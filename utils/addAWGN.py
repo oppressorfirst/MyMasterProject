@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from pathlib import Path
+import re
 
 # ====== 配置区：改这里就行 ======
 sigma = 20
@@ -31,7 +32,14 @@ for p in sorted(in_dir.iterdir()):
     noise = np.random.normal(0.0, sigma, size=img_f.shape).astype(np.float32)
     noisy = np.clip(img_f + noise, 0, 255).astype(np.uint8)
 
-    out_path = out_dir / p.name
+    m = re.match(r"(\d+)_Y", p.stem)  # p.stem: "1_Y"
+    if m:
+        n = int(m.group(1))
+        out_name = f"y_{n:02d}_noise.png"
+    else:
+        out_name = f"{p.stem}_noise.png"
+
+    out_path = out_dir / out_name
     cv2.imwrite(str(out_path), noisy)
     cnt += 1
 
