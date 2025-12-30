@@ -15,14 +15,15 @@ def read_gray_float01(path: Path) -> np.ndarray:
 # =========================
 # Step 1 - CONFIG (只改这里)
 # =========================
+this_file = Path(__file__).resolve()    # 不带后缀，例如 my_script
 base = Path("../Datasets/DAVIS/480p/bus-Y")
-out_path = Path("../output/baseline/simple_block_matching")
+out_path = Path(f"../output/baseline/{this_file.stem}")
 out_path.mkdir(parents=True, exist_ok=True)
 
 
 gt_path = base / "ori_photo" / "1_Y.png"
 
-noisy_dir = base / "ori_photo_20AWGN_123456"
+noisy_dir = base / "noise_photo_20AWGN_123456"
 t_path   = noisy_dir / "y_01_noise.png"
 
 patch_size = 16

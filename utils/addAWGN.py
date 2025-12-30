@@ -9,7 +9,7 @@ in_dir = Path("../Datasets/DAVIS/480p/bus-Y/ori_photo")   # 你的输入文件�
 seed = 123456
 # ===============================
 
-out_dir = in_dir.parent / f"{in_dir.name}_{sigma}AWGN_{seed}"
+out_dir = in_dir.parent / f"noise_photo_{sigma}AWGN_{seed}"
 out_dir.mkdir(parents=True, exist_ok=True)
 
 # 支持的图片后缀（按需增减）
