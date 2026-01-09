@@ -1,0 +1,16 @@
+[project]
+name = "mymasterproject"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numba>=0.63.1",
+    "numpy>=2.3.5",
+    "opencv-python>=4.11.0.86",
+    "pyiqa>=0.1.14.1",
+    "scikit-image>=0.26.0",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+]
