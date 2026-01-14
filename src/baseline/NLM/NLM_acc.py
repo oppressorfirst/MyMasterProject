@@ -5,6 +5,7 @@ from numba import njit, prange
 from src.utils import getMetrics, AI_Metrics
 from tqdm import tqdm
 from pathlib import Path
+from numba import njit, prange
 
 # 定位到项目根 MyMasterProject
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -25,52 +26,50 @@ def make_kernel(r, sigma):
     return kernel / np.sum(kernel)  # 归一化
 
 
-def non_local_means(noisy_img, h, patch_r, window_r, sigma):
+@njit(parallel=True, fastmath=True)
+def non_local_means_numba(noisy_img, padded, kernel, h, patch_r, window_r):
     H, W = noisy_img.shape
-    output_img = np.zeros([H, W])
+    output_img = np.zeros((H, W), dtype=np.float32)
 
-    padded_img = np.pad(noisy_img, pad_width=patch_r, mode='reflect')
-
-    kernel_a = make_kernel(patch_r, sigma)
-    print("开始处理... (可能需要一点时间)")
-    pbar = tqdm(total=H * W, desc="NLM Pixels")
-    for i_row in range(H):
+    for i_row in prange(H):
         for i_col in range(W):
-            pbar.update(1)
-            # 这里的 i 对应文本中的像素 i
-            # 在 padded_img 中，i 的坐标需要偏移 f
-            # print(f"match for  {i_row}, {i_col}")
             i_row_pad = i_row + patch_r
             i_col_pad = i_col + patch_r
 
-            patch_i = padded_img[i_row_pad - patch_r: i_row_pad + patch_r + 1,
-            i_col_pad - patch_r: i_col_pad + patch_r + 1]
-
-            w_sum = 0.0  # 对应文本中的 Z(i)
-            weighted_val = 0.0  # 对应 ∑ w(i,j)v(j)
+            w_sum = 0.0
+            weighted_val = 0.0
 
             r_min_row = max(i_row - window_r, 0)
             r_max_row = min(i_row + window_r, H)
             r_min_col = max(i_col - window_r, 0)
             r_max_col = min(i_col + window_r, W)
 
-            for j_row in range(r_min_row , r_max_row):
-                for j_col in range(r_min_col , r_max_col):
+            for j_row in range(r_min_row, r_max_row):
+                for j_col in range(r_min_col, r_max_col):
 
                     j_row_pad = j_row + patch_r
                     j_col_pad = j_col + patch_r
-                    patch_j = padded_img[j_row_pad - patch_r: j_row_pad + patch_r + 1,
-                                            j_col_pad - patch_r: j_col_pad + patch_r + 1]
-                    distance_squared = np.sum(((patch_i - patch_j) ** 2) * kernel_a)
-                    weight = np.exp(-distance_squared / (h ** 2))
 
-                    weighted_val += weight * noisy_img[j_row, j_col]  # 注意这里乘的是 v(j)
+                    dist2 = 0.0
+
+                    for dx in range(-patch_r, patch_r + 1):
+                        for dy in range(-patch_r, patch_r + 1):
+                            a = padded[i_row_pad + dx, i_col_pad + dy]
+                            b = padded[j_row_pad + dx, j_col_pad + dy]
+                            w = kernel[dx + patch_r, dy + patch_r]
+                            diff = a - b
+                            dist2 += w * diff * diff
+
+                    weight = np.exp(-dist2 / (h * h))
+                    weighted_val += weight * noisy_img[j_row, j_col]
                     w_sum += weight
 
-            output_img[i_row, i_col] = weighted_val / w_sum
-    pbar.close()
-    return output_img
+            if w_sum > 1e-8:
+                output_img[i_row, i_col] = weighted_val / w_sum
+            else:
+                output_img[i_row, i_col] = noisy_img[i_row, i_col]
 
+    return output_img
 
 
 
@@ -81,12 +80,12 @@ noisy_path = DATA_DIR / "classic_photo_AWGN_sigma20_seed123456" / "lena_gray_sig
 original_img = cv2.imread(str(original_path), cv2.IMREAD_GRAYSCALE)
 noisy_img = cv2.imread(str(noisy_path), cv2.IMREAD_GRAYSCALE)
 
-patch_r = 2
-window_r = 10
-h_val = 1
-sigma = 1
+patch_r = 3
+window_r = 20
+h_val = 15
+sigma = 0.9
 
-output_filename = OUT_DIR/ "baseline"/"NLM"/f"lena_gray_NLM_h{h_val}_patch_r{patch_r}_window_r{window_r}_sigma{sigma}.png"
+output_filename = OUT_DIR/ "baseline"/"NLM"/f"lena_gray_NLM_acc_h{h_val}_patch_r{patch_r}_window_r{window_r}_sigma{sigma}.png"
 output_filename.parent.mkdir(parents=True, exist_ok=True)
 
 # 确保图片读取成功
@@ -95,14 +94,23 @@ if original_img is None or noisy_img is None:
 else:
     original_img = original_img.astype(np.float32)
     noisy_img = noisy_img.astype(np.float32)
-    # output_img = cv2.imread(str(output_filename), cv2.IMREAD_GRAYSCALE)
 
-    output_img = non_local_means(
+    # output_img = non_local_means(
+    #     noisy_img.astype(np.float32),
+    #     h = h_val,
+    #     patch_r = patch_r,
+    #    window_r= window_r,
+    #     sigma=sigma
+    # )
+
+    padded_img = np.pad(noisy_img, pad_width=patch_r, mode='reflect')
+    output_img = non_local_means_numba(
         noisy_img.astype(np.float32),
-        h = h_val,
-        patch_r = patch_r,
-       window_r= window_r,
-        sigma=sigma
+        padded_img,
+        make_kernel(patch_r, sigma),
+        h_val,
+        patch_r,
+        window_r
     )
     output_img_uint8 = np.clip(output_img, 0, 255).astype(np.uint8)
     cv2.imwrite(str(output_filename), output_img_uint8)
