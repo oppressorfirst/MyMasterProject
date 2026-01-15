@@ -3,7 +3,7 @@ import cv2
 
 # 添加 utils 文件夹到 Python 路径
 from utils import getMetrics, AI_Metrics
-
+import time
 
 def bilateral_filter_custom(image, rho, h, sigma_s):
     """
@@ -107,13 +107,17 @@ else:
 
     # sigma_s: 空间距离容忍度 (Spatial Sigma) -> 对应公式里的 rho
     # 也就是离多远就算“远”了。通常 sigma_s 设为 rho 的一半左右比较合适
-    sigma_s_val = 4.0
+    sigma_s_val = 3.0
 
     # 3. 运行双边滤波
+    start_time = time.perf_counter()
     denoised_img = bilateral_filter_custom(noisy_img_float, rho=rho_val, h=h_val, sigma_s=sigma_s_val)
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
 
+    print(f"处理耗时: {elapsed_time:.4f} 秒")
     # 4. 定义输出路径
-    output_filename = f'../../../out/baseline/neighborhood_filter/lena_gray_bilateral_h{h_val}_rho{rho_val}_s{int(sigma_s_val)}.png'
+    output_filename = f'../../../out/images/baseline/neighborhood_filter/lena_gray_bilateral_h{h_val}_rho{rho_val}_s{int(sigma_s_val)}.png'
 
     # 5. 保存结果
     cv2.imwrite(output_filename, denoised_img)

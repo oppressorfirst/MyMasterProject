@@ -1,0 +1,12 @@
+方法, 降噪参数,加噪水平,图片名称, PSNR（越大越好）, SSIM（越大越好）,LPIPS（越小越好）,运行时间
+yaroslavsky,"h=30, rho=3","AWGN, sigma=20",lena,31.00,0.8034,0.1730,4.9456s
+yaroslavsky,"h=20, rho=3","AWGN, sigma=20",lena,29.32,0.7085,0.2409,3.7097s
+yaroslavsky,"h=40, rho=3","AWGN, sigma=20",lena,31.54,0.8414,0.1493,4.6858s
+bilateral,"h=30, rho=7, s=3","AWGN, sigma=20",lena,31.03,0.7994,0.1663,5.9620s
+bilateral,"h=30, rho=7, s=4","AWGN, sigma=20",lena,31.25,0.8244,0.1760,4.6516s
+gaussian,h=1,"AWGN, sigma=20",lena,31.34,0.8400,0.2299,1.7219s
+gaussian,h=0.9,"AWGN, sigma=20",lena,31.57,0.8326,0.2166,1.4919s
+NLM,"h=20, patch_r=4, window_r=20, sigma=1","AWGN, sigma=20",lena,31.84,0.8545,0.1215,8.62s(numba)
+NLM,"h=25, patch_r=5, window_r=30, sigma=1","AWGN, sigma=20",lena,30.53,0.8472,0.1561,22.08s(numba)
+NLM,"h=15, patch_r=3, window_r=20, sigma=0.9","AWGN, sigma=20",lena,32.08,0.8271,0.1310,6.06s(numba)
+NLM,"h=15, patch_r=3, window_r=20, sigma=1.1","AWGN, sigma=20",lena,32.52,0.8538,0.0998,5.944s(numba)

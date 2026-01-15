@@ -4,6 +4,7 @@
 /.stfolder
 /.venv
 /data
-/out
+/out/images
+
 
 /.stignore

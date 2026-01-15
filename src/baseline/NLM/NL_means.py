@@ -81,12 +81,14 @@ noisy_path = DATA_DIR / "classic_photo_AWGN_sigma20_seed123456" / "lena_gray_sig
 original_img = cv2.imread(str(original_path), cv2.IMREAD_GRAYSCALE)
 noisy_img = cv2.imread(str(noisy_path), cv2.IMREAD_GRAYSCALE)
 
-patch_r = 2
-window_r = 10
-h_val = 1
-sigma = 1
 
-output_filename = OUT_DIR/ "baseline"/"NLM"/f"lena_gray_NLM_h{h_val}_patch_r{patch_r}_window_r{window_r}_sigma{sigma}.png"
+patch_r = 3
+window_r = 20
+h_val = 15
+sigma = 1.1
+
+
+output_filename = OUT_DIR/ "images"/ "baseline"/"NLM"/f"lena_gray_NLM_h{h_val}_patch_r{patch_r}_window_r{window_r}_sigma{sigma}.png"
 output_filename.parent.mkdir(parents=True, exist_ok=True)
 
 # 确保图片读取成功
@@ -114,7 +116,7 @@ else:
 
     # 7. 计算指标 (Denoised vs Original)
     denoised_metrics = getMetrics.calculate_metrics(original_img.astype(np.uint8), output_img)
-    print(f"【双边滤波】 PSNR: {denoised_metrics['PSNR']:.2f} | SSIM: {denoised_metrics['SSIM']:.4f}")
+    print(f"【去噪声后】 PSNR: {denoised_metrics['PSNR']:.2f} | SSIM: {denoised_metrics['SSIM']:.4f}")
     print("-" * 30)
     print(f"处理完成！图片已保存为: {output_filename}")
 

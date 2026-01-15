@@ -47,9 +47,9 @@ if __name__ == "__main__":
     path_original = "../../data/classic_photo/lena_gray.png"
 
     # 假设这是刚才生成的两张结果图的路径
-    path_gaussian = "../../out/baseline/gaussian_filter/lena_gray_gaussian_sigma1.0.png"
+    path_gaussian = "../../out/images/baseline/gaussian_filter/lena_gray_gaussian_sigma1.0.png"
     # 注意：你需要先运行之前的双边滤波代码生成这张图
-    path_bilateral = "../../out/baseline/neighborhood_filter/lena_gray_bilateral_h30_rho5_s5.png"
+    path_bilateral = "../../out/images/baseline/neighborhood_filter/lena_gray_bilateral_h30_rho5_s5.png"
 
     # 检查文件是否存在
     import os

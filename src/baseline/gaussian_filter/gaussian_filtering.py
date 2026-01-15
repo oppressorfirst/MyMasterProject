@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 # 添加 utils 文件夹到 Python 路径
 from utils import getMetrics, AI_Metrics
-
+import time
 
 def gaussian_filter_custom(image, sigma):
     """
@@ -104,16 +104,20 @@ else:
     # -------------------------------------------------
     # 3. 设置参数
     # -------------------------------------------------
-    sigma_val = 1  # 高斯模糊的强度，你可以试试 1.0, 2.0, 3.0
+    sigma_val = 0.9  # 高斯模糊的强度，你可以试试 1.0, 2.0, 3.0
 
     # 4. 运行高斯滤波
+    start_time = time.perf_counter()
     denoised_img = gaussian_filter_custom(noisy_img_float, sigma=sigma_val)
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
 
+    print(f"处理耗时: {elapsed_time:.4f} 秒")
     # 5. 计算 Method Noise
     method_noise_img = get_method_noise(noisy_img, denoised_img)
 
     # 6. 保存路径
-    output_dir = '../../../out/baseline/gaussian_filter/'
+    output_dir = '../../../out/images/baseline/gaussian_filter/'
     os.makedirs(output_dir, exist_ok=True)  # 确保文件夹存在
 
     out_name = f'{output_dir}lena_gray_gaussian_sigma{sigma_val}.png'
@@ -134,6 +138,5 @@ else:
     print("-" * 30)
     print(f"处理完成！\n去噪图: {out_name}\nMethod Noise: {noise_name}")
 
-    output_path = Path(output_dir) / out_name
-    lpips, _ = AI_Metrics.compare_advanced_metrics(original_path, str(output_path))
+    lpips, _ = AI_Metrics.compare_advanced_metrics(original_path, str(out_name))
     print(f"{lpips:.4f} ")

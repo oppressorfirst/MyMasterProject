@@ -3,6 +3,7 @@ import cv2
 
 # 添加 utils 文件夹到 Python 路径
 from utils import getMetrics, AI_Metrics
+import time
 
 def yaroslavsky_neighborhood_filter(image, rho, h):
     """
@@ -81,12 +82,16 @@ noisy_img = noisy_img.astype(np.float32)
 # rho = 3: 表示看周围半径为3的区域 (7x7的窗口)
 # h = 30: 表示如果两个像素差值超过30，权重就会变得很小（不参考它）
 rho_val = 3
-h_val = 40
+h_val = 30
 
 # 4. 运行我们写的滤波器
+start_time = time.perf_counter()
 denoised_img = yaroslavsky_neighborhood_filter(noisy_img, rho=rho_val, h=h_val)
+end_time = time.perf_counter()
+elapsed_time = end_time - start_time
 
-output_filename = f'../../../out/baseline/neighborhood_filter/lena_gray_yaroslavsky_h{h_val}_rho{rho_val}.png'
+print(f"处理耗时: {elapsed_time:.4f} 秒")
+output_filename = f'../../../out/images/baseline/neighborhood_filter/lena_gray_yaroslavsky_h{h_val}_rho{rho_val}.png'
 
 
 

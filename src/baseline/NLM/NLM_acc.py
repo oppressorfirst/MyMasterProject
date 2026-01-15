@@ -6,6 +6,7 @@ from src.utils import getMetrics, AI_Metrics
 from tqdm import tqdm
 from pathlib import Path
 from numba import njit, prange
+import time
 
 # 定位到项目根 MyMasterProject
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -80,12 +81,12 @@ noisy_path = DATA_DIR / "classic_photo_AWGN_sigma20_seed123456" / "lena_gray_sig
 original_img = cv2.imread(str(original_path), cv2.IMREAD_GRAYSCALE)
 noisy_img = cv2.imread(str(noisy_path), cv2.IMREAD_GRAYSCALE)
 
-patch_r = 3
-window_r = 20
-h_val = 15
-sigma = 0.9
+h_val=20
+patch_r=4
+window_r=20
+sigma=1
 
-output_filename = OUT_DIR/ "baseline"/"NLM"/f"lena_gray_NLM_acc_h{h_val}_patch_r{patch_r}_window_r{window_r}_sigma{sigma}.png"
+output_filename = OUT_DIR/ "images"/"baseline"/"NLM"/f"lena_gray_NLM_acc_h{h_val}_patch_r{patch_r}_window_r{window_r}_sigma{sigma}.png"
 output_filename.parent.mkdir(parents=True, exist_ok=True)
 
 # 确保图片读取成功
@@ -104,6 +105,8 @@ else:
     # )
 
     padded_img = np.pad(noisy_img, pad_width=patch_r, mode='reflect')
+    # --- 开始计时 ---
+    start_time = time.perf_counter()
     output_img = non_local_means_numba(
         noisy_img.astype(np.float32),
         padded_img,
@@ -112,6 +115,10 @@ else:
         patch_r,
         window_r
     )
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+
+    print(f"NLM 处理耗时: {elapsed_time:.4f} 秒")
     output_img_uint8 = np.clip(output_img, 0, 255).astype(np.uint8)
     cv2.imwrite(str(output_filename), output_img_uint8)
 
