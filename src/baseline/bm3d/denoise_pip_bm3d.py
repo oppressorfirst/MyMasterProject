@@ -4,6 +4,8 @@ from pathlib import Path
 from bm3d import bm3d, BM3DStages
 import time
 from skimage.metrics import structural_similarity as ssim
+from src.utils import getMetrics, AI_Metrics
+
 
 def psnr(gt, x):
     mse = np.mean((gt - x) ** 2)
@@ -19,18 +21,25 @@ def stats_str(name, img01):
 # =========================
 # Step 1) 路径
 # =========================
-base = Path("../Datasets/DAVIS/480p/bus-Y")
+# 定位到项目根 MyMasterProject
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DATA_DIR = PROJECT_ROOT / "data"
+OUT_DIR = PROJECT_ROOT / "out"
 
-gt_path    = base / "ori_photo" / "1_Y.png"
-noisy_path = base / "ori_photo_20AWGN_123456" / "y_01_noise.png"
+gt_path    = DATA_DIR / "classic_photo" / "lena_gray.png"
+noisy_path =  DATA_DIR / "classic_photo_AWGN_sigma20_seed123456" / "lena_gray_sigma20_seed123456.png"
 
-out_dir = base / ("bm3d_" + noisy_path.parent.name)
+out_dir =  OUT_DIR/ "images"/ "baseline"/"bm3d"
 out_dir.mkdir(parents=True, exist_ok=True)
 
-out_path = out_dir / "1_Y_bm3d.png"
+
+sigma_255 = 12
+sigma = sigma_255 / 255.0
+
+out_path = out_dir / f"lena_pip_bm3d_sigma{sigma:.2f}.png"
 
 # 新增：log 文件
-log_path = out_dir / "run_log.txt"
+log_path = out_dir / "pip_bm3d_run_log.txt"
 
 def log_print(msg: str):
     # 同时输出到终端 + 写入log文件
@@ -65,36 +74,26 @@ log_print(stats_str("Noisy", noisy))
 # =========================
 # Step 4) BM3D + 时间
 # =========================
-sigma_255 = 20
-sigma = sigma_255 / 255.0
+
 
 t0 = time.perf_counter()
 den = bm3d(noisy, sigma_psd=sigma, stage_arg=BM3DStages.ALL_STAGES)
 t1 = time.perf_counter()
-
-log_print(stats_str("BM3D", den))
-log_print(f"[TIME] BM3D runtime: {(t1 - t0)*1000:.2f} ms")
-
-# =========================
-# Step 5) PSNR + SSIM
-# =========================
-psnr_noisy = psnr(gt, noisy)
-psnr_bm3d  = psnr(gt, den)
-
-ssim_noisy = ssim(gt, noisy, data_range=1.0)
-ssim_bm3d  = ssim(gt, den,   data_range=1.0)
-
-log_print(f"[INFO] GT     : {gt_path}")
-log_print(f"[INFO] Noisy  : {noisy_path}")
-log_print(f"[INFO] OutDir : {out_dir}")
-log_print(f"[INFO] Log    : {log_path}")
-
-log_print(f"Noisy PSNR: {psnr_noisy:.2f} dB | SSIM: {ssim_noisy:.4f}")
-log_print(f"BM3D  PSNR: {psnr_bm3d:.2f} dB | SSIM: {ssim_bm3d:.4f}")
-
-# =========================
-# Step 6) 存结果（顺便把 den clip 一下更干净）
-# =========================
 den_clip = np.clip(den, 0.0, 1.0)
-cv2.imwrite(str(out_path), (den_clip * 255.0 + 0.5).astype(np.uint8))
+den_u8 = (den_clip * 255.0 + 0.5).astype(np.uint8)
+cv2.imwrite(str(out_path), den_u8)
 log_print(f"[OK] Saved: {out_path}")
+
+print(f"[TIME] BM3D runtime: {(t1 - t0)*1000:.2f} ms")
+print("-" * 30)
+noise_metrics = getMetrics.calculate_metrics(gt_u8.astype(np.uint8), noisy_u8.astype(np.uint8))
+print(f"【原带噪图】 PSNR: {noise_metrics['PSNR']:.2f} | SSIM: {noise_metrics['SSIM']:.4f}")
+
+# 7. 计算指标 (Denoised vs Original)
+denoised_metrics = getMetrics.calculate_metrics(gt_u8.astype(np.uint8), den_u8)
+print(f"【去噪声后】 PSNR: {denoised_metrics['PSNR']:.2f} | SSIM: {denoised_metrics['SSIM']:.4f}")
+print("-" * 30)
+print(f"处理完成！图片已保存为: {out_path}")
+
+lpips, _ = AI_Metrics.compare_advanced_metrics(str(gt_path), str(out_path))
+print(f"{lpips:.4f} ")

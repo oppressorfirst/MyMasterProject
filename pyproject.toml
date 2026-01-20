@@ -5,6 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "bm3d>=4.0.3",
+    "ipykernel>=7.1.0",
+    "ipympl>=0.9.8",
+    "jupyterlab>=4.5.2",
     "matplotlib>=3.10.8",
     "numba>=0.63.1",
     "numpy>=2.3.5",
