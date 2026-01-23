@@ -3,64 +3,67 @@ import time
 
 import cv2
 import numpy as np
-from skimage.metrics import structural_similarity as ssim
+import matplotlib.pyplot as plt
 
 
-def read_gray_float01(path: Path) -> np.ndarray:
-    img_u8 = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-    if img_u8 is None:
-        raise FileNotFoundError(f"Cannot read image: {path}")
-    return img_u8.astype(np.float32) / 255.0
 
 # =========================
-# Step 1 - CONFIG (只改这里)
+# Step 1 - CONFIG
 # =========================
-this_file = Path(__file__).resolve()    # 不带后缀，例如 my_script
-base = Path("../Datasets/DAVIS/480p/bus-Y")
-out_path = Path(f"../output/baseline/{this_file.stem}")
-out_path.mkdir(parents=True, exist_ok=True)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DATA_DIR = PROJECT_ROOT / "data"
+noisy_path = DATA_DIR / "classic_photo_AWGN_sigma20_seed123456" / "lena_gray_sigma20_seed123456.png"
 
+patch_size = 7
+ref_y = 280
+ref_x = 128
+top_k = 16
 
-gt_path = base / "ori_photo" / "1_Y.png"
+# =========================
+# Step 2 - Load
+# =========================
+noisy_img = cv2.imread(str(noisy_path), cv2.IMREAD_GRAYSCALE)
+if noisy_img is None:
+    raise FileNotFoundError(f"找不到图片：{noisy_path}")
 
-noisy_dir = base / "noise_photo_20AWGN_123456"
-t_path   = noisy_dir / "y_01_noise.png"
+noisy_img_float = noisy_img.astype(np.float32) / 255.0
+H, W = noisy_img_float.shape
 
-patch_size = 16
+ref_patch = noisy_img_float[ref_y:ref_y+patch_size, ref_x:ref_x+patch_size]
 
-# 你指定的源 patch 左上角坐标
-ref_y = 240
-ref_x = 235
-img = read_gray_float01(t_path)
-ref_patch = img[ref_y:ref_y+patch_size, ref_x:ref_x+patch_size]
-H, W = img.shape
-top_k = 10
+# =========================
+# Step 3 - Brute force search + timing
+# =========================
+matches = []  # (dist, y, x)
 
-matches = []  # 每个元素：(dist, y, x)
+t0 = time.perf_counter()
 
 for y in range(0, H - patch_size + 1):
     for x in range(0, W - patch_size + 1):
-        cand_patch = img[y:y+patch_size, x:x+patch_size]
-
-        # L2 距离（MSE 形式）
+        cand_patch = noisy_img_float[y:y+patch_size, x:x+patch_size]
         diff = ref_patch - cand_patch
         dist = np.mean(diff * diff)
-
         matches.append((dist, y, x))
-
 
 matches.sort(key=lambda t: t[0])
 top_matches = matches[:top_k]
 
+t1 = time.perf_counter()
+
+print("=" * 60)
+print(f"Brute-force window-free search took {t1 - t0:.4f} s")
+print("=" * 60)
+
 for i, (d, y, x) in enumerate(top_matches):
     print(f"{i}: dist={d:.6e}, pos=({y},{x})")
 
-
-
-vis = (img * 255).astype(np.uint8)
+# =========================
+# Step 4 - Visualization (big image)
+# =========================
+vis = (noisy_img_float * 255).astype(np.uint8)
 vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
 
-# reference patch（绿色）
+# Reference patch: green
 cv2.rectangle(
     vis,
     (ref_x, ref_y),
@@ -69,7 +72,7 @@ cv2.rectangle(
     2
 )
 
-# Top-K matches（红色）
+# Top-K: red
 for _, y, x in top_matches:
     cv2.rectangle(
         vis,
@@ -79,15 +82,8 @@ for _, y, x in top_matches:
         1
     )
 
-cv2.imwrite(f"{out_path}/block_matching_vis.png", vis)
-
-patches = []
-for _, y, x in top_matches:
-    patches.append(img[y:y+patch_size, x:x+patch_size])
-
-patches = np.stack(patches, axis=0)  # (K, p, p)
-
-# 简单拼成一排
-collage = np.hstack(patches)
-collage_u8 = (collage * 255).astype(np.uint8)
-cv2.imwrite(f"{out_path}/matched_patches.png", collage_u8)
+plt.figure(figsize=(6, 6))
+plt.title("Reference (green) & Top-K matches (red)")
+plt.imshow(vis[..., ::-1])
+plt.axis("off")
+plt.show()

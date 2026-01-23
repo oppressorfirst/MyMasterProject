@@ -10,7 +10,7 @@ import numpy as np
 from numba import njit, prange
 import time
 
-from patch_matching_init import initialize_aknn,visualize_pixel_and_candidates
+from AKNN_init import initialize_aknn,visualize_pixel_and_candidates
 
 # --- 1. 核心辅助函数：维护优先队列 ---
 def update_best_k(img, y, x, prop_dy, prop_dx, offsets, dists, patch_size, H, W, K):

@@ -328,11 +328,11 @@ if __name__ == "__main__":
 
     img_float = noisy_img.astype(np.float32) / 255.0
 
-    K = 4
-    patch_size = 7
+    K = 16
+    patch_size = 8
     iterations = 3
     seed = 123
-    win_size = 32  # ✅ 只在 32x32 内搜索
+    win_size = 39 # ✅ 只在 32x32 内搜索
 
     # 计时：注意第一次包含 JIT 编译时间
     t0 = time.perf_counter()
