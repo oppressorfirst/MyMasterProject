@@ -1,22 +1,23 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
+import numpy as np
+import cv2
 
-original_path = "../data/classic_photo/lena_gray.png"
-noisy_path = "../data/classic_photo_AWGN_sigma20_seed123456/lena_gray_sigma20_seed123456.png"
-
-original_img = cv2.imread(original_path, cv2.IMREAD_GRAYSCALE)
-noisy_img = cv2.imread(noisy_path, cv2.IMREAD_GRAYSCALE)
-patch_r = 90
-padded_img = np.pad(noisy_img, pad_width=patch_r, mode='reflect')
-i_row = 64
-i_col = 64
+# 添加 utils 文件夹到 Python 路径
+from utils import getMetrics, AI_Metrics
+import time
 
 
-i_row_pad = i_row + patch_r
-i_col_pad = i_col + patch_r
+original_path = "/Users/oppressor/Desktop/MyMasterProject/data/classic_photo/lena_gray.png"
+original = cv2.imread(original_path, cv2.IMREAD_GRAYSCALE)
+original = original.astype(np.float32)
+denoised_img_path = "/Users/oppressor/Desktop/MyMasterProject/out/images/Copy of 03_denoised.png"
+denoised_img = cv2.imread(denoised_img_path, cv2.IMREAD_GRAYSCALE)
+denoised_img = denoised_img.astype(np.float32)
 
-patch_i = padded_img[0: 540,0 :240]
-plt.figure(figsize=(8, 4))
-plt.imshow(patch_i, cmap='gray')
-plt.show()
+
+denoised_metrics = getMetrics.calculate_metrics(original.astype(np.uint8), denoised_img)
+print(f"去噪后PSNR: {denoised_metrics['PSNR']:.2f} dB")
+print(f"去噪后SSIM: {denoised_metrics['SSIM']:.4f}")
+print(f"去噪后MSE: {denoised_metrics['MSE']:.2f}")

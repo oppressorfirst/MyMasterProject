@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 
 # ====== 配置区：改这里就行 ======
-sigma = 20
+sigma = 15
 in_dir = Path("../../data/classic_photo")   # 你的输入文件夹（改成你的实际路径）
 seed = 123456
 # ===============================
