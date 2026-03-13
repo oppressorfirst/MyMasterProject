@@ -31,13 +31,37 @@ def read_png_to_yuv(path, normalize=True):
 # -------------------------
 # 添加噪声
 # -------------------------
-def add_awgn_noise(y, sigma=25, seed=0):
+def add_awgn_noise(y, sigma=25, seed=42):
     rng = np.random.default_rng(seed)
     sigma_norm = sigma / 255.0
     noise = rng.normal(0, sigma_norm, y.shape)
     noisy_y = np.clip(y + noise, 0, 1)
     return noisy_y
 
+
+def add_poisson_gaussian_noise(img_clean, a=0.1, sigma_norm=25/255, seed=None):
+    """
+    为 [0, 1] 范围的图像添加真实的泊松-高斯混合噪声 (支持复现)。
+    参数:
+        img_clean: 干净的原图 (float32 or float64, 范围 0~1)
+        a: 泊松增益 (Photon Gain)。常用测试范围 0.005 ~ 0.05
+        b: 高斯读取噪声方差 (Read Noise Variance)。常用测试范围 0.0001 ~ 0.005
+        seed: 随机数种子。传入一个整数(如 42)即可保证每次生成的噪声完全一致。
+    """
+    # 使用局部随机生成器，不会影响外部代码 (如 AKNN) 的 np.random 状态
+    rng = np.random.default_rng(seed)
+
+    # 1. 模拟泊松噪声
+    photon_counts = np.maximum(img_clean / a, 1e-10)
+    noisy_poisson = rng.poisson(photon_counts) * a
+
+    # 2. 模拟高斯噪声
+    noisy_gaussian = rng.normal(0, sigma_norm, img_clean.shape)
+
+    # 3. 混合并限制范围
+    noisy_img = noisy_poisson + noisy_gaussian
+
+    return np.clip(noisy_img, 0.0, 1.0).astype(np.float32)
 
 # -------------------------
 # 可视化并保存
@@ -144,11 +168,11 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
 # print(f"所有结果已成功保存到 {csv_path}")
 
 
-image_path = f"data/classic_photo/lena_gray.png"
+image_path = f"data/classic_photo/lena_gray_left_up.png"
 y, cb, cr, img_bgr = read_png_to_yuv(image_path)
 sigma = 25
 sigma_norm = sigma / 255.0
-y_noise = add_awgn_noise(y, sigma)
+y_noise = add_poisson_gaussian_noise(y, a=0.02, sigma_norm=sigma_norm, seed=42)
 # BM3D 这里的 z 接受 [0,1] 范围
 denoised_y_norm = bm3d.bm3d(
     z=y_noise,

@@ -7,10 +7,37 @@ import matplotlib.pyplot as plt
 from scipy.fft import dctn, idctn
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
+
+
+def add_poisson_gaussian_noise(img_clean, a=0.1, sigma_norm=25/255, seed=None):
+    """
+    为 [0, 1] 范围的图像添加真实的泊松-高斯混合噪声 (支持复现)。
+    参数:
+        img_clean: 干净的原图 (float32 or float64, 范围 0~1)
+        a: 泊松增益 (Photon Gain)。常用测试范围 0.005 ~ 0.05
+        b: 高斯读取噪声方差 (Read Noise Variance)。常用测试范围 0.0001 ~ 0.005
+        seed: 随机数种子。传入一个整数(如 42)即可保证每次生成的噪声完全一致。
+    """
+    # 使用局部随机生成器，不会影响外部代码 (如 AKNN) 的 np.random 状态
+    rng = np.random.default_rng(seed)
+
+    # 1. 模拟泊松噪声
+    photon_counts = np.maximum(img_clean / a, 1e-10)
+    noisy_poisson = rng.poisson(photon_counts) * a
+
+    # 2. 模拟高斯噪声
+    noisy_gaussian = rng.normal(0, sigma_norm, img_clean.shape)
+
+    # 3. 混合并限制范围
+    noisy_img = noisy_poisson + noisy_gaussian
+
+    return np.clip(noisy_img, 0.0, 1.0).astype(np.float32)
+
+
 # =========================
 # Step 1 - CONFIG
 # =========================
-clean_path = "data/classic_photo/lena_gray.png"
+clean_path = "data/classic_photo/lena_gray_left_up.png"
 clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
 if clean_path is None:
     print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
@@ -18,15 +45,16 @@ img_clean = clean_img_cv.astype(np.float32) / 255.0
 sigma_val = 25
 sigma_norm = sigma_val / 255.0
 np.random.seed(42)  # 固定种子方便复现
-noise = np.random.normal(0, sigma_norm, img_clean.shape)
-noisy_img_float = np.clip(img_clean + noise, 0, 1)
+# noise = np.random.normal(0, sigma_norm, img_clean.shape)
+noisy_img_float = add_poisson_gaussian_noise(img_clean, a=0.02,sigma_norm=sigma_norm, seed=42)
+# noisy_img_float = np.clip(img_clean + noise, 0, 1)
 
 
-patch_size = 8
+patch_size = 10
 top_k = 16
 window_size = 39
 
-stride = patch_size// 2  # 不重叠
+stride = 1  # 不重叠
 search_radius = window_size // 2
 
 # =========================
@@ -40,6 +68,8 @@ H, W = noisy_img_float.shape
 # =========================
 from tqdm import tqdm
 import time
+
+guide_img = cv2.GaussianBlur(noisy_img_float, (5, 5), 1.5)
 
 # =========================
 # Step 3 - Brute-force windowed matching + timing (with tqdm)
@@ -59,7 +89,7 @@ for ref_y in ref_ys:
     for ref_x in ref_xs:
         t0 = time.perf_counter()
 
-        ref_patch = noisy_img_float[
+        ref_patch = guide_img[
             ref_y:ref_y + patch_size,
             ref_x:ref_x + patch_size
         ]
@@ -79,7 +109,7 @@ for ref_y in ref_ys:
                 if y == ref_y and x == ref_x:
                     continue
 
-                cand_patch = noisy_img_float[y:y + patch_size, x:x + patch_size]
+                cand_patch = guide_img[y:y + patch_size, x:x + patch_size]
                 diff = ref_patch - cand_patch
                 dist = np.mean(diff * diff)
 
@@ -158,6 +188,78 @@ plt.axis("off")
 plt.show()
 
 
+def bm3d_1st_stage_poisson_gaussian(img, all_results, patch_size, a, sigma_norm):
+    """
+    针对泊松-高斯噪声改进的 BM3D 第一阶段 (自适应局部硬阈值)
+    a: 泊松增益 (Photon gain)
+    b: 高斯读取噪声方差 (Gaussian variance)
+    """
+    H, W = img.shape
+    numerator = np.zeros_like(img, dtype=np.float64)
+    denominator = np.zeros_like(img, dtype=np.float64)
+
+    print("\nStarting Adaptive BM3D 1st Stage Collaborative Filtering...")
+
+    for res in tqdm(all_results, desc="3D Filtering (Adaptive)"):
+        ref_y, ref_x = res["ref_pos"]
+        matches = res["top_matches"]
+
+        # 1. 整理坐标与堆叠 3D 张量
+        coords = [(ref_y, ref_x)] + [(y, x) for dist, y, x in matches]
+        K_actual = len(coords)
+        group_3d = np.zeros((K_actual, patch_size, patch_size), dtype=np.float64)
+        for i, (y, x) in enumerate(coords):
+            group_3d[i] = img[y:y + patch_size, x:x + patch_size]
+
+        # ========================================================
+        # 【核心改进 1：估计局部亮度与局部噪声标准差】
+        # ========================================================
+        # 使用参考块 (第 0 层) 的均值作为当前这组相似块的局部真实亮度估计
+        local_mean = np.mean(group_3d[0])
+        local_mean = max(local_mean, 0.0)  # 防止极端情况出现负值
+
+        # 根据泊松-高斯模型计算局部标准差
+        local_sigma2 = a * local_mean + sigma_norm
+        local_sigma = np.sqrt(max(local_sigma2, 1e-10))
+
+        # 动态计算当前 3D 块的硬阈值
+        lambda_3d_local = 2.7 * local_sigma
+        # ========================================================
+
+        # 3. 3D 变换 (使用 3D DCT)
+        group_3d_freq = dctn(group_3d, norm='ortho')
+
+        # 4. 自适应硬阈值截断
+        group_3d_freq[np.abs(group_3d_freq) < lambda_3d_local] = 0
+
+        # ========================================================
+        # 【核心改进 2：自适应聚合权重】
+        # ========================================================
+        # 在原版 BM3D 中，权重其实是 1 / (N_nonzero * sigma^2)
+        # 以前 sigma 是全局常数所以省略了，现在 sigma 是局部的，必须加进来！
+        # 否则亮部块（噪声方差大）的错误累加会污染全局
+        n_nonzero = np.sum(group_3d_freq != 0)
+        if n_nonzero > 0:
+            weight = 1.0 / (n_nonzero * local_sigma2)
+        else:
+            weight = 1.0 / local_sigma2
+        # ========================================================
+
+        # 6. 逆 3D 变换
+        group_3d_denoised = idctn(group_3d_freq, norm='ortho')
+
+        # 7. 聚合 (把去噪后的块加权贴回原图)
+        for i, (y, x) in enumerate(coords):
+            numerator[y:y + patch_size, x:x + patch_size] += group_3d_denoised[i] * weight
+            denominator[y:y + patch_size, x:x + patch_size] += weight
+
+    # 8. 归一化输出
+    mask = denominator > 0
+    denoised_img = img.copy()
+    denoised_img[mask] = numerator[mask] / denominator[mask]
+
+    return np.clip(denoised_img, 0, 1)
+
 def bm3d_1st_stage_from_results(img, all_results, patch_size, sigma):
     """
     利用预先计算好的 all_results (匹配坐标) 进行 3D 协同硬阈值降噪
@@ -219,7 +321,8 @@ sigma_assumed = 25 / 255.0
 
 t_filter0 = time.perf_counter()
 # 传入原图、匹配结果列表、patch_size 和 sigma
-denoised_result = bm3d_1st_stage_from_results(noisy_img_float, all_results, patch_size, sigma_assumed)
+# denoised_result = bm3d_1st_stage_from_results(noisy_img_float, all_results, patch_size, sigma_assumed)
+denoised_result = bm3d_1st_stage_poisson_gaussian(noisy_img_float,all_results, patch_size, a=0.02, sigma_norm=sigma_assumed)
 t_filter1 = time.perf_counter()
 
 current_psnr = psnr(img_clean, denoised_result, data_range=1.0)

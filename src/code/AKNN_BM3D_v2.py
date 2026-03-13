@@ -243,7 +243,7 @@ def bm3d_1st_stage(noisy_img, offsets, patch_size, sigma, step=3):
 
 if __name__ == "__main__":
 
-    clean_path = "data/classic_photo/lena_gray_left_up.png"
+    clean_path = "data/classic_photo/lena_gray.png"
     clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
     if clean_path is None:
         print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
@@ -256,7 +256,7 @@ if __name__ == "__main__":
     img_noisy = np.clip(img_clean + noise, 0, 1)
 
     K = 15  # 我们想找 5 个最近邻
-    patch_size = 9 # 补丁大小
+    patch_size = 7 # 补丁大小
     offsets, dists = initialize_aknn(img_noisy, K, patch_size)
     final_offsets, final_dists = run_aknn_pure_python(img_noisy, offsets, dists, 4,patch_size,sigma_norm)
     visualize_pixel_and_candidates(
