@@ -1,155 +1,130 @@
-from pathlib import Path
-import time
-
-import cv2
 import numpy as np
+import cv2
+import time
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-# =========================
-# Step 1 - CONFIG
-# =========================
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DATA_DIR = PROJECT_ROOT / "data"
-noisy_path = DATA_DIR / "classic_photo_AWGN_sigma20_seed123456" / "lena_gray_sigma20_seed123456.png"
 
-patch_size = 8
-top_k = 16
-window_size = 39
-
-stride = patch_size// 2  # 不重叠
-search_radius = window_size // 2
-
-# =========================
-# Step 2 - Load
-# =========================
-
-noisy_img = cv2.imread(str(noisy_path), cv2.IMREAD_GRAYSCALE)
-if noisy_img is None:
-    raise FileNotFoundError(f"找不到图片：{noisy_path}")
-
-noisy_img_float = noisy_img.astype(np.float32) / 255.0
-H, W = noisy_img_float.shape
-
-# =========================
-# Step 3 - Brute-force windowed matching + timing
-# =========================
-from tqdm import tqdm
-import time
-
-# =========================
-# Step 3 - Brute-force windowed matching + timing (with tqdm)
-# =========================
-all_results = []
-
-# 预生成 ref 坐标列表，tqdm 才能准确显示 total
-ref_ys = list(range(0, H - patch_size + 1, stride))
-ref_xs = list(range(0, W - patch_size + 1, stride))
-total = len(ref_ys) * len(ref_xs)
-
-t_global0 = time.perf_counter()
-
-pbar = tqdm(total=total, desc="Brute-force matching", dynamic_ncols=True)
-
-for ref_y in ref_ys:
-    for ref_x in ref_xs:
-        t0 = time.perf_counter()
-
-        ref_patch = noisy_img_float[
-            ref_y:ref_y + patch_size,
-            ref_x:ref_x + patch_size
-        ]
-
-        matches = []
-
-        # ---------- ① 限制搜索窗口 ----------
-        y_min = max(0, ref_y - search_radius)
-        y_max = min(H - patch_size, ref_y + search_radius)
-
-        x_min = max(0, ref_x - search_radius)
-        x_max = min(W - patch_size, ref_x + search_radius)
-
-        for y in range(y_min, y_max + 1):
-            for x in range(x_min, x_max + 1):
-                # ---------- ② 排除 self ----------
-                if y == ref_y and x == ref_x:
-                    continue
-
-                cand_patch = noisy_img_float[y:y + patch_size, x:x + patch_size]
-                diff = ref_patch - cand_patch
-                dist = np.mean(diff * diff)
-
-                matches.append((dist, y, x))
-
-        matches.sort(key=lambda t: t[0])
-        top_matches = matches[:top_k]
-
-        t1 = time.perf_counter()
-
-        all_results.append({
-            "ref_pos": (ref_y, ref_x),
-            "top_matches": top_matches,
-            "time": t1 - t0
-        })
-
-        # tqdm 更新
-        pbar.update(1)
-
-        # 每隔一段更新一次 postfix（避免频繁 set_postfix 带来开销）
-        if (pbar.n % 200) == 0 or pbar.n == total:
-            elapsed = time.perf_counter() - t_global0
-            avg_time = elapsed / pbar.n
-            best_dist = top_matches[0][0] if len(top_matches) > 0 else float("nan")
-            pbar.set_postfix({
-                "elapsed_s": f"{elapsed:.1f}",
-                "avg_s/ref": f"{avg_time:.4f}",
-                "best": f"{best_dist:.2e}",
-            })
-
-pbar.close()
-
-t_global1 = time.perf_counter()
-
-print("=" * 60)
-print(f"Total brute-force windowed matching time: {t_global1 - t_global0:.3f} s")
-print("=" * 60)
+# -------------------------
+# 1. 核心搜索函数 (SAD 距离)
+# -------------------------
+def get_sad(p1, p2):
+    return np.sum(np.abs(p1 - p2))
 
 
-# =========================
-# Step 4 - 可视化某一个 ref
-# =========================
-idx = 556  # 你原来选的
-res = all_results[idx]
+def update_best_k(img, y, x, prop_dy, prop_dx, offsets, dists, patch_size, K):
+    H, W = img.shape
+    ny, nx = y + prop_dy, x + prop_dx
+    r = patch_size // 2
 
-ref_y, ref_x = res["ref_pos"]
-top_matches = res["top_matches"]
+    # 边界检查
+    if ny - r < 0 or ny + r >= H or nx - r < 0 or nx + r >= W:
+        return
 
-vis = (noisy_img_float * 255).astype(np.uint8)
-vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
+    # 提取 Patch 并计算 SAD
+    p_ref = img[y - r: y + r + 1, x - r: x + r + 1]
+    p_cand = img[ny - r: ny + r + 1, nx - r: nx + r + 1]
+    dist = np.sum(np.abs(p_ref - p_cand))
 
-# ref patch（绿）
-cv2.rectangle(
-    vis,
-    (ref_x, ref_y),
-    (ref_x + patch_size - 1, ref_y + patch_size - 1),
-    (0, 255, 0),
-    2
-)
+    # 如果比当前最差的还好，且不是同一个位置，则插入
+    if dist < dists[y, x, -1]:
+        # 查重
+        for k in range(K):
+            if offsets[y, x, k, 0] == prop_dy and offsets[y, x, k, 1] == prop_dx:
+                return
 
-# top-k（红）
-for _, y, x in top_matches:
-    cv2.rectangle(
-        vis,
-        (x, y),
-        (x + patch_size - 1, y + patch_size - 1),
-        (0, 0, 255),
-        1
-    )
+        # 插入并排序
+        dists[y, x, -1] = dist
+        offsets[y, x, -1] = [prop_dy, prop_dx]
 
-# ---------- 显示 ----------
-plt.figure(figsize=(6, 6))
-plt.title(f"Ref {idx}  (green=ref, red=topK)")
-plt.imshow(vis[..., ::-1])
-plt.axis("off")
-plt.show()
+        # 简单排序保持 dists 有序
+        idx = np.argsort(dists[y, x])
+        dists[y, x] = dists[y, x, idx]
+        offsets[y, x] = offsets[y, x, idx]
 
 
+# -------------------------
+# 2. 降噪函数 (协同平均)
+# -------------------------
+def collaborative_denoise(noisy_img, final_offsets):
+    H, W = noisy_img.shape
+    K = final_offsets.shape[2]
+    denoised_img = np.zeros_like(noisy_img)
+
+    print("正在进行协同平均降噪...")
+    for y in range(H):
+        for x in range(W):
+            pixel_values = []
+            for k in range(K):
+                dy, dx = final_offsets[y, x, k]
+                ny, nx = y + dy, x + dx
+                pixel_values.append(noisy_img[ny, nx])
+
+            # 取 K 个相似像素的平均值
+            denoised_img[y, x] = np.mean(pixel_values)
+
+    return denoised_img
+
+
+# -------------------------
+# 3. 主实验流程
+# -------------------------
+def run_denoise_test():
+    # A. 读取并裁剪图片 (为了不加速也能跑，先切一小块)
+    raw_img = cv2.imread("data/classic_photo/lena_gray.png", cv2.IMREAD_GRAYSCALE)
+    if raw_img is None:
+        print("未找到图片，请检查路径")
+        return
+
+    # 裁剪 128x128 区域演示
+    img = raw_img[200:328, 200:328].astype(np.float32) / 255.0
+    H, W = img.shape
+
+    # B. 添加噪声 (Sigma = 20)
+    sigma = 20 / 255.0
+    noisy_img = img + np.random.normal(0, sigma, img.shape)
+    noisy_img = np.clip(noisy_img, 0, 1)
+
+    # C. 初始化 AKNN
+    K = 8
+    patch_size = 7
+    offsets = np.random.randint(-15, 16, (H, W, K, 2))
+    dists = np.full((H, W, K), 1e6)
+
+    # D. 开始 AKNN 搜索迭代
+    print(f"开始 AKNN 搜索 (4次迭代)...")
+    for i in range(4):
+        # 简单的传播与随机搜索合并演示
+        for y in tqdm(range(H), desc=f"第 {i + 1} 轮扫描"):
+            for x in range(W):
+                # 1. 检查邻居 (传播)
+                if y > 0: update_best_k(noisy_img, y, x, offsets[y - 1, x, 0, 0], offsets[y - 1, x, 0, 1], offsets,
+                                        dists, patch_size, K)
+                if x > 0: update_best_k(noisy_img, y, x, offsets[y, x - 1, 0, 0], offsets[y, x - 1, 0, 1], offsets,
+                                        dists, patch_size, K)
+
+                # 2. 随机搜索 (加窗)
+                rad = max(1, int((W // 4) * (0.5 ** i)))
+                ry, rx = np.random.randint(-rad, rad + 1), np.random.randint(-rad, rad + 1)
+                update_best_k(noisy_img, y, x, offsets[y, x, 0, 0] + ry, offsets[y, x, 0, 1] + rx, offsets, dists,
+                              patch_size, K)
+
+    # E. 执行降噪
+    denoised_result = collaborative_denoise(noisy_img, offsets)
+
+    # F. 结果对比
+    plt.figure(figsize=(15, 5))
+    plt.subplot(1, 3, 1);
+    plt.title("Original (Clean)");
+    plt.imshow(img, cmap='gray')
+    plt.subplot(1, 3, 2);
+    plt.title("Noisy (Input)");
+    plt.imshow(noisy_img, cmap='gray')
+    plt.subplot(1, 3, 3);
+    plt.title(f"Denoised (K={K} Mean)");
+    plt.imshow(denoised_result, cmap='gray')
+    plt.show()
+
+
+if __name__ == "__main__":
+    run_denoise_test()
