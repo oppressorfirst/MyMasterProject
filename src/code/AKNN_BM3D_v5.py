@@ -16,7 +16,7 @@ from scipy.fft import dctn, idctn  # 引入 3D 变换库
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 import concurrent.futures
-
+import pywt
 
 def split_image_into_4_blocks(img, overlap=39):
     """
@@ -434,24 +434,48 @@ def bm3d_1st_stage_poisson_gaussian_offsets(img, offsets, patch_size, a, sigma_n
             lambda_3d_local = 2.7 * local_sigma
             # ========================================================
 
-            # 3. 3D 变换 (使用 3D DCT)
-            group_3d_freq = dctn(group_3d, norm='ortho')
+            # ========================================================
+            # 3. 混合 3D 变换 (面向硬件架构设计的 2D DCT + 1D Haar)
+            # ========================================================
 
-            # 4. 自适应硬阈值截断
-            group_3d_freq[np.abs(group_3d_freq) < lambda_3d_local] = 0
+            # 3.1 空间域 2D DCT：仅对图像块的高和宽 (axis 1 和 2) 进行变换
+            group_2d_dct = dctn(group_3d, axes=(1, 2), norm='ortho')
+
+            # 3.2 深度域 1D Haar 小波：沿 K 维 (axis 0) 提取块间的冗余特征
+            # wavedec 返回一个列表，包含多层分解的近似(cA)与细节(cD)系数
+            haar_coeffs = pywt.wavedec(group_2d_dct, 'haar', mode='symmetric', axis=0)
 
             # ========================================================
-            # 【核心改进 2：自适应聚合权重】
+            # 4. 自适应硬阈值截断与非零计数
             # ========================================================
-            n_nonzero = np.sum(group_3d_freq != 0)
+            n_nonzero = 0
+            for i in range(len(haar_coeffs)):
+                # 对 Haar 小波每一层的系数分别进行硬阈值截断
+                haar_coeffs[i][np.abs(haar_coeffs[i]) < lambda_3d_local] = 0
+                # 累加所有保留下来的非零系数个数
+                n_nonzero += np.sum(haar_coeffs[i] != 0)
+
+            # ========================================================
+            # 5. 计算自适应聚合权重
+            # ========================================================
             if n_nonzero > 0:
                 weight = 1.0 / (n_nonzero * local_sigma2)
             else:
                 weight = 1.0 / local_sigma2
+
+            # ========================================================
+            # 6. 逆向混合变换
             # ========================================================
 
-            # 6. 逆 3D 变换
-            group_3d_denoised = idctn(group_3d_freq, norm='ortho')
+            # 6.1 深度域 1D Haar 逆变换
+            group_1d_inv = pywt.waverec(haar_coeffs, 'haar', mode='symmetric', axis=0)
+
+            # 处理动态 K 值：如果传入的 K_actual 为奇数，waverec 重建时可能因对称补零多出 1 层
+            # 这里安全截断以对齐原始块数量
+            group_1d_inv = group_1d_inv[:K_actual, :, :]
+
+            # 6.2 空间域 2D DCT 逆变换
+            group_3d_denoised = idctn(group_1d_inv, axes=(1, 2), norm='ortho')
 
             # 7. 聚合 (把去噪后的块加权贴回原图)
             for i, (cy, cx) in enumerate(coords):
@@ -531,7 +555,7 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
         ty = (i // 4) * h + 30
         cv2.putText(final_canvas, text, (tx, ty), font, 0.7, (0, 255, 0), 2)
 
-    cv2.imwrite(os.path.join(img_save_dir, f"full_process_{idx:02d}.png"), final_canvas)
+    cv2.imwrite(os.path.join(img_save_dir, f"AKNN_BM3D_haar_{idx:02d}.png"), final_canvas)
 
 if __name__ == "__main__":
 
@@ -656,7 +680,7 @@ if __name__ == "__main__":
     img_save_dir.mkdir(parents=True, exist_ok=True)
 
     # CSV 保存路径
-    csv_file_path = Path(dataset_path) / "bm3d_results.csv"
+    csv_file_path = Path(dataset_path) / "AKNN_bm3d_haar_results.csv"
 
     # 算法参数
     sigma_val = 25
