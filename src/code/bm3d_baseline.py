@@ -168,11 +168,11 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
 # print(f"所有结果已成功保存到 {csv_path}")
 
 
-image_path = f"data/classic_photo/lena_gray_left_up.png"
+image_path = f"data/classic_photo/lena_gray.png"
 y, cb, cr, img_bgr = read_png_to_yuv(image_path)
-sigma = 25
+sigma = 15
 sigma_norm = sigma / 255.0
-y_noise = add_poisson_gaussian_noise(y, a=0.02, sigma_norm=sigma_norm, seed=42)
+y_noise = add_poisson_gaussian_noise(y, a=0.015, sigma_norm=sigma_norm, seed=42)
 # BM3D 这里的 z 接受 [0,1] 范围
 denoised_y_norm = bm3d.bm3d(
     z=y_noise,

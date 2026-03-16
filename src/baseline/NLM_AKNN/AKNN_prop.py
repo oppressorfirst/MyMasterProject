@@ -279,7 +279,7 @@ if __name__ == "__main__":
         offsets=final_offsets,
         patch_size=patch_size,
         sigma=sigma_norm,
-        step=1  # 步长为 3 提速
+        step=4  # 步长为 3 提速
     )
     current_psnr = psnr(img_clean, img_denoised, data_range=1.0)
     current_ssim = ssim(img_clean, img_denoised, data_range=1.0)

@@ -9,6 +9,32 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 
 
+
+def calc_dct_distance(p_ref, p_cand, C, C_T, threshold):
+    """计算经过 2D DCT 硬阈值预滤波后的距离"""
+    # 1. 2D DCT 变换: F = C * P * C^T
+    ref_freq = np.dot(np.dot(C, p_ref), C_T)
+    cand_freq = np.dot(np.dot(C, p_cand), C_T)
+
+    # 2. 硬阈值截断：绝对值小于阈值的置为 0 (剔除噪声)
+    ref_freq[np.abs(ref_freq) < threshold] = 0.0
+    cand_freq[np.abs(cand_freq) < threshold] = 0.0
+
+    # 3. 计算频域差值的平方和 (等价于去噪后的空域距离)
+    diff = ref_freq - cand_freq
+    return np.sum(diff * diff)
+
+def get_dct_matrix(N):
+    """生成 NxN 的一维 DCT-II 变换矩阵"""
+    C = np.zeros((N, N), dtype=np.float64)
+    for k in range(N):
+        for n in range(N):
+            if k == 0:
+                C[k, n] = 1.0 / np.sqrt(N)
+            else:
+                C[k, n] = np.sqrt(2.0 / N) * np.cos(np.pi * k * (2 * n + 1) / (2 * N))
+    return C
+
 def add_poisson_gaussian_noise(img_clean, a=0.1, sigma_norm=25/255, seed=None):
     """
     为 [0, 1] 范围的图像添加真实的泊松-高斯混合噪声 (支持复现)。
@@ -37,7 +63,7 @@ def add_poisson_gaussian_noise(img_clean, a=0.1, sigma_norm=25/255, seed=None):
 # =========================
 # Step 1 - CONFIG
 # =========================
-clean_path = "data/classic_photo/lena_gray_left_up.png"
+clean_path = "data/classic_photo/lena_gray.png"
 clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
 if clean_path is None:
     print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
@@ -50,11 +76,11 @@ noisy_img_float = add_poisson_gaussian_noise(img_clean, a=0.02,sigma_norm=sigma_
 # noisy_img_float = np.clip(img_clean + noise, 0, 1)
 
 
-patch_size = 10
-top_k = 16
+patch_size = 8
+top_k = 8
 window_size = 39
 
-stride = 1  # 不重叠
+stride = patch_size // 2  # 不重叠
 search_radius = window_size // 2
 
 # =========================
@@ -84,6 +110,8 @@ total = len(ref_ys) * len(ref_xs)
 t_global0 = time.perf_counter()
 
 pbar = tqdm(total=total, desc="Brute-force matching", dynamic_ncols=True)
+C_matrix = get_dct_matrix(patch_size)
+C_T_matrix = C_matrix.T
 
 for ref_y in ref_ys:
     for ref_x in ref_xs:
@@ -110,6 +138,8 @@ for ref_y in ref_ys:
                     continue
 
                 cand_patch = guide_img[y:y + patch_size, x:x + patch_size]
+
+                # dist = calc_dct_distance(ref_patch, cand_patch, C_matrix, C_T_matrix, 2.5 * sigma_norm)
                 diff = ref_patch - cand_patch
                 dist = np.mean(diff * diff)
 

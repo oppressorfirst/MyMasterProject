@@ -15,34 +15,10 @@ from skimage.metrics import structural_similarity as ssim
 from AKNN_init import initialize_aknn,visualize_pixel_and_candidates
 
 
-def calc_dct_distance(p_ref, p_cand, C, C_T, threshold):
-    """计算经过 2D DCT 硬阈值预滤波后的距离"""
-    # 1. 2D DCT 变换: F = C * P * C^T
-    ref_freq = np.dot(np.dot(C, p_ref), C_T)
-    cand_freq = np.dot(np.dot(C, p_cand), C_T)
-
-    # 2. 硬阈值截断：绝对值小于阈值的置为 0 (剔除噪声)
-    ref_freq[np.abs(ref_freq) < threshold] = 0.0
-    cand_freq[np.abs(cand_freq) < threshold] = 0.0
-
-    # 3. 计算频域差值的平方和 (等价于去噪后的空域距离)
-    diff = ref_freq - cand_freq
-    return np.sum(diff * diff)
-
-def get_dct_matrix(N):
-    """生成 NxN 的一维 DCT-II 变换矩阵"""
-    C = np.zeros((N, N), dtype=np.float64)
-    for k in range(N):
-        for n in range(N):
-            if k == 0:
-                C[k, n] = 1.0 / np.sqrt(N)
-            else:
-                C[k, n] = np.sqrt(2.0 / N) * np.cos(np.pi * k * (2 * n + 1) / (2 * N))
-    return C
 
 
 # --- 1. 核心辅助函数：维护优先队列 ---
-def update_best_k(img, y, x, prop_dy, prop_dx, offsets, dists, patch_size, H, W, K, C, C_T, threshold):
+def update_best_k(img, y, x, prop_dy, prop_dx, offsets, dists, patch_size, H, W, K):
     ny, nx = y + prop_dy, x + prop_dx
     r = patch_size // 2
 
@@ -52,6 +28,10 @@ def update_best_k(img, y, x, prop_dy, prop_dx, offsets, dists, patch_size, H, W,
     if ny - r < 0 or ny - r + patch_size > H or nx - r < 0 or nx - r + patch_size > W:
         return
 
+    if (prop_dy != 0 or prop_dx != 0) and (abs(prop_dy) <= r and abs(prop_dx) <= r):
+        return
+
+
     # 2. 提取 Patch
     patch_src = img[y - r: y - r + patch_size, x - r: x - r + patch_size]
     patch_tgt = img[ny - r: ny - r + patch_size, nx - r: nx - r + patch_size]
@@ -60,7 +40,8 @@ def update_best_k(img, y, x, prop_dy, prop_dx, offsets, dists, patch_size, H, W,
         return
 
     # 3. 使用魔改后的 DCT 距离替换普通的 SSD！
-    new_dist = calc_dct_distance(patch_src, patch_tgt, C, C_T, threshold)
+    diff = patch_src - patch_tgt
+    new_dist = np.sum(diff * diff)
 
     # 4. 检查是否值得插入
     current_dists = dists[y, x]
@@ -88,7 +69,7 @@ def update_best_k(img, y, x, prop_dy, prop_dx, offsets, dists, patch_size, H, W,
 
 
 # --- 2. 传播步骤 (Propagation) ---
-def propagation_step(img, offsets, dists, patch_size, iter_num, C, C_T, threshold):
+def propagation_step(img, offsets, dists, patch_size, iter_num):
     H, W = img.shape[:2]
     K = offsets.shape[2]
     print(f"  > Propagation (Direction: {'Scanline' if iter_num % 2 == 0 else 'Reverse'})...")
@@ -110,11 +91,11 @@ def propagation_step(img, offsets, dists, patch_size, iter_num, C, C_T, threshol
                 for k in range(K):
                     prop_dy, prop_dx = nb_offsets[k]
                     update_best_k(img, y, x, prop_dy, prop_dx,
-                                  offsets, dists, patch_size, H, W, K, C, C_T, threshold)
+                                  offsets, dists, patch_size, H, W, K)
 
 
 # --- 3. 随机搜索步骤 (Random Search) ---
-def random_search_step(img, offsets, dists, patch_size, search_radius, C, C_T, threshold):
+def random_search_step(img, offsets, dists, patch_size, search_radius):
     H, W = img.shape[:2]
     K = offsets.shape[2]
     print(f"  > Random Search (Radius: {search_radius:.2f})...")
@@ -129,7 +110,7 @@ def random_search_step(img, offsets, dists, patch_size, search_radius, C, C_T, t
                 search_dx = best_dx + rand_dx
 
                 update_best_k(img, y, x, search_dy, search_dx,
-                              offsets, dists, patch_size, H, W, K, C, C_T, threshold)
+                              offsets, dists, patch_size, H, W, K)
 
 
 # --- 4. 主程序：把所有步骤串起来 ---
@@ -146,8 +127,6 @@ def run_aknn_pure_python(img, init_offsets, init_dists, iterations, patch_size, 
     print(f"Starting AKNN Loop ({iterations} iterations)...")
 
     # ========== 准备 DCT 矩阵和阈值 ==========
-    C_matrix = get_dct_matrix(patch_size)
-    C_T_matrix = C_matrix.T
 
     # 根据 BM3D 论文，2D 预滤波匹配时的硬阈值推荐为 2.5 * sigma 或者更激进一点
     dct_threshold = 2.5 * sigma_norm
@@ -157,12 +136,12 @@ def run_aknn_pure_python(img, init_offsets, init_dists, iterations, patch_size, 
         t0 = time.time()
 
         # 将矩阵和阈值传下去
-        propagation_step(img, offsets, dists, patch_size, i, C_matrix, C_T_matrix, dct_threshold)
+        propagation_step(img, offsets, dists, patch_size, i)
 
         current_radius = search_radius * (0.5 ** i)
         if current_radius < 1: current_radius = 1
 
-        random_search_step(img, offsets, dists, patch_size, current_radius, C_matrix, C_T_matrix, dct_threshold)
+        random_search_step(img, offsets, dists, patch_size, current_radius)
 
         t1 = time.time()
         tqdm.write(f"Iteration {i + 1} finished in {t1 - t0:.2f}s")
@@ -241,24 +220,142 @@ def bm3d_1st_stage(noisy_img, offsets, patch_size, sigma, step=3):
     # 限制范围在 [0, 1]
     return np.clip(denoised_img, 0, 1)
 
+
+def add_poisson_gaussian_noise(img_clean, a=0.1, sigma_norm=25/255, seed=None):
+    """
+    为 [0, 1] 范围的图像添加真实的泊松-高斯混合噪声 (支持复现)。
+    参数:
+        img_clean: 干净的原图 (float32 or float64, 范围 0~1)
+        a: 泊松增益 (Photon Gain)。常用测试范围 0.005 ~ 0.05
+        b: 高斯读取噪声方差 (Read Noise Variance)。常用测试范围 0.0001 ~ 0.005
+        seed: 随机数种子。传入一个整数(如 42)即可保证每次生成的噪声完全一致。
+    """
+    # 使用局部随机生成器，不会影响外部代码 (如 AKNN) 的 np.random 状态
+    rng = np.random.default_rng(seed)
+
+    # 1. 模拟泊松噪声
+    photon_counts = np.maximum(img_clean / a, 1e-10)
+    noisy_poisson = rng.poisson(photon_counts) * a
+
+    # 2. 模拟高斯噪声
+    noisy_gaussian = rng.normal(0, sigma_norm, img_clean.shape)
+
+    # 3. 混合并限制范围
+    noisy_img = noisy_poisson + noisy_gaussian
+
+    return np.clip(noisy_img, 0.0, 1.0).astype(np.float32)
+
+
+def bm3d_1st_stage_poisson_gaussian_offsets(img, offsets, patch_size, a, sigma_norm, step=3):
+    """
+    接收 AKNN offsets 的泊松-高斯自适应 BM3D 降噪
+    """
+    H, W = img.shape
+    K_offsets = offsets.shape[2]
+    r = patch_size // 2
+
+    numerator = np.zeros_like(img, dtype=np.float64)
+    denominator = np.zeros_like(img, dtype=np.float64)
+
+    print("\nStarting Adaptive BM3D 1st Stage with Offsets...")
+
+    # 使用步长 step 遍历图像，极大节省 3D 变换的计算量
+    for y in trange(r, H - r, step, desc="BM3D 3D Transform"):
+        for x in range(r, W - r, step):
+
+            # 1. 整理坐标：【关键】把参考块自身 (y, x) 强制放在第 0 层！
+            coords = [(y, x)]
+
+            # 遍历 offsets 提取这一个像素的 K 个相似块坐标
+            for k in range(K_offsets):
+                dy, dx = offsets[y, x, k]
+                ny, nx = y + dy, x + dx
+
+                # 越界检查 (只保留在图像内部的块)
+                # 使用通用的边界计算，兼容奇偶数 patch_size
+                if r <= ny <= H - patch_size + r and r <= nx <= W - patch_size + r:
+                    coords.append((ny, nx))
+
+            K_actual = len(coords)
+            if K_actual <= 1:
+                continue  # 如果除了自己以外没找到合法的，就跳过
+
+            # 2. 堆叠成 3D 张量
+            group_3d = np.zeros((K_actual, patch_size, patch_size), dtype=np.float64)
+            for i, (cy, cx) in enumerate(coords):
+                group_3d[i] = img[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size]
+
+            # ========================================================
+            # 【核心改进 1：估计局部亮度与局部噪声标准差】
+            # ========================================================
+            local_mean = np.mean(group_3d[0])
+            local_mean = max(local_mean, 0.0)
+
+            # 【已修复！】高斯噪声的方差必须是 sigma_norm 的平方
+            local_sigma2 = a * local_mean + (sigma_norm ** 2)
+            local_sigma = np.sqrt(max(local_sigma2, 1e-10))
+
+            # 动态计算当前 3D 块的硬阈值
+            lambda_3d_local = 2.7 * local_sigma
+            # ========================================================
+
+            # 3. 3D 变换 (使用 3D DCT)
+            group_3d_freq = dctn(group_3d, norm='ortho')
+
+            # 4. 自适应硬阈值截断
+            group_3d_freq[np.abs(group_3d_freq) < lambda_3d_local] = 0
+
+            # ========================================================
+            # 【核心改进 2：自适应聚合权重】
+            # ========================================================
+            n_nonzero = np.sum(group_3d_freq != 0)
+            if n_nonzero > 0:
+                weight = 1.0 / (n_nonzero * local_sigma2)
+            else:
+                weight = 1.0 / local_sigma2
+            # ========================================================
+
+            # 6. 逆 3D 变换
+            group_3d_denoised = idctn(group_3d_freq, norm='ortho')
+
+            # 7. 聚合 (把去噪后的块加权贴回原图)
+            for i, (cy, cx) in enumerate(coords):
+                numerator[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size] += group_3d_denoised[i] * weight
+                denominator[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size] += weight
+
+    # 8. 归一化输出
+    mask = denominator > 0
+    denoised_img = img.copy()
+    denoised_img[mask] = numerator[mask] / denominator[mask]
+
+    return np.clip(denoised_img, 0, 1)
+
+
 if __name__ == "__main__":
 
-    clean_path = "data/classic_photo/lena_gray_left_up.png"
+    clean_path = "data/classic_photo/lena_gray.png"
     clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
     if clean_path is None:
         print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
     img_clean = clean_img_cv.astype(np.float32) / 255.0
 
-    sigma_val = 25
+    sigma_val = 15
     sigma_norm = sigma_val / 255.0
     np.random.seed(42)  # 固定种子方便复现
-    noise = np.random.normal(0, sigma_norm, img_clean.shape)
-    img_noisy = np.clip(img_clean + noise, 0, 1)
+    img_noisy = add_poisson_gaussian_noise(img_clean, a=0.015, sigma_norm=sigma_norm, seed=42)
+    #noise = np.random.normal(0, sigma_norm, img_clean.shape)
+    #img_noisy = np.clip(img_clean + noise, 0, 1)
 
-    K = 15  # 我们想找 5 个最近邻
-    patch_size = 9 # 补丁大小
-    offsets, dists = initialize_aknn(img_noisy, K, patch_size)
-    final_offsets, final_dists = run_aknn_pure_python(img_noisy, offsets, dists, 4,patch_size,sigma_norm)
+    guide_img = cv2.GaussianBlur(img_noisy, (5, 5), 1.5)
+    K = 7  # 我们想找 5 个最近邻
+    patch_size = 7 # 补丁大小
+
+
+    offsets, dists = initialize_aknn(guide_img, K, patch_size)
+
+
+    final_offsets, final_dists = run_aknn_pure_python(guide_img, offsets, dists, 2,patch_size,sigma_norm)
+
     visualize_pixel_and_candidates(
         img_noisy,
         32,
@@ -274,13 +371,23 @@ if __name__ == "__main__":
         patch_size
     )
 
-    img_denoised = bm3d_1st_stage(
-        noisy_img=img_noisy,
+    # img_denoised = bm3d_1st_stage(
+    #     noisy_img=img_noisy,
+    #     offsets=final_offsets,
+    #     patch_size=patch_size,
+    #     sigma=sigma_norm,
+    #     step=1  # 步长为 3 提速
+    # )
+
+    img_denoised = bm3d_1st_stage_poisson_gaussian_offsets(
+        img=img_noisy,
         offsets=final_offsets,
         patch_size=patch_size,
-        sigma=sigma_norm,
-        step=4  # 步长为 3 提速
+        a=0.03,
+        sigma_norm=sigma_norm,
+        step=4  # <--- 使用步长提速！
     )
+
     current_psnr = psnr(img_clean, img_denoised, data_range=1.0)
     current_ssim = ssim(img_clean, img_denoised, data_range=1.0)
     print(f"PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
