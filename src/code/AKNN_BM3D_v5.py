@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
@@ -7,6 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
+import csv
 from numba import njit, prange
 import time
 from scipy.fft import dctn, idctn  # 引入 3D 变换库
@@ -463,102 +466,307 @@ def bm3d_1st_stage_poisson_gaussian_offsets(img, offsets, patch_size, a, sigma_n
     return np.clip(denoised_img, 0, 1)
 
 
+def read_png_to_yuv(path, normalize=True):
+    img = cv2.imread(path)
+    if img is None:
+        return None, None, None, None
+
+    yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+    y = yuv[:, :, 0]
+    cr = yuv[:, :, 1]  # 注意：OpenCV 中索引1是 Cr
+    cb = yuv[:, :, 2]  # 索引2是 Cb
+
+    if normalize:
+        y = y.astype(np.float32) / 255.0
+        cb = cb.astype(np.float32) / 255.0
+        cr = cr.astype(np.float32) / 255.0
+
+    return y, cb, cr, img
+
+
+def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
+    def to_bgr_uint8(img_gray):
+        gray_255 = (np.clip(img_gray, 0, 1) * 255).astype(np.uint8)
+        return cv2.cvtColor(gray_255, cv2.COLOR_GRAY2BGR)
+
+    h, w, _ = img_bgr.shape
+
+    # 合成彩色图 (顺序必须是 Y, Cr, Cb)
+    noisy_yuv = np.stack([(y_noise * 255).astype(np.uint8),
+                          (cr * 255).astype(np.uint8),
+                          (cb * 255).astype(np.uint8)], axis=2)
+    noisy_bgr = cv2.cvtColor(noisy_yuv, cv2.COLOR_YCrCb2BGR)
+
+    denoised_yuv = np.stack([(y_denoised * 255).astype(np.uint8),
+                             (cr * 255).astype(np.uint8),
+                             (cb * 255).astype(np.uint8)], axis=2)
+    denoised_bgr = cv2.cvtColor(denoised_yuv, cv2.COLOR_YCrCb2BGR)
+
+    # 计算残差 (降噪去掉的部分)
+    residual = np.abs(y_denoised - y)
+    residual_vis = np.clip(residual * 5, 0, 1)  # 放大5倍
+
+    # 转换各通道用于拼接
+    y_orig_v = to_bgr_uint8(y)
+    y_noisy_v = to_bgr_uint8(y_noise)  # 修复这里：之前误写成了 y
+    y_denoised_v = to_bgr_uint8(y_denoised)
+    residual_v = to_bgr_uint8(residual_vis)
+
+    noise = y_noise - y # 直接计算噪声（不放大）
+    noise_v = to_bgr_uint8(noise)
+
+    # 拼接：第一行彩色，第二行亮度/残差
+    row1 = np.hstack([img_bgr, noisy_bgr, denoised_bgr, noise_v])
+    row2 = np.hstack([y_orig_v, y_noisy_v, y_denoised_v, residual_v])
+    final_canvas = np.vstack([row1, row2])
+
+    # 写标签
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    labels = [
+        "Orig Color", "Noisy Color", "Denoised Color", "noisy",
+        "Orig Y", "Noisy Y", "Denoised Y", "Residual (x10)"
+    ]
+    for i, text in enumerate(labels):
+        tx = (i % 4) * w + 10
+        ty = (i // 4) * h + 30
+        cv2.putText(final_canvas, text, (tx, ty), font, 0.7, (0, 255, 0), 2)
+
+    cv2.imwrite(os.path.join(img_save_dir, f"full_process_{idx:02d}.png"), final_canvas)
+
 if __name__ == "__main__":
-    clean_path = "data/classic_photo/lena_gray.png"
-    clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
-    if clean_img_cv is None:
-        print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
-        exit()
 
-    img_clean = clean_img_cv.astype(np.float32) / 255.0
+    # idx = 3
+    # dataset_path = "data/PhotoCD_PCD0992"
+    # clean_path = Path(dataset_path) / f"{idx:02d}.png"
+    # img_save_dir = Path(dataset_path) / "results"
+    #
+    # y, cb, cr, clean_img_cv = read_png_to_yuv(clean_path)
+    # if clean_img_cv is None:
+    #     print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
+    #     exit()
+    #
+    # sigma_val = 25
+    # sigma_norm = sigma_val / 255.0
+    # a_val = 0.02
+    # K = 7
+    # patch_size = 7
+    # process_step = 2
+    # overlap_pixels = 39  # 设置你想要的重叠像素
+    #
+    # np.random.seed(42)
+    # y_noisy = add_poisson_gaussian_noise(y, a=a_val, sigma_norm=sigma_norm, seed=42)
+    # guide_img = cv2.GaussianBlur(y_noisy, (5, 5), 1.5)
+    #
+    # # ==========================================
+    # # 分治策略 (Divide and Conquer)
+    # # ==========================================
+    #
+    # # 1. 切分为 4 块
+    # noisy_blocks, block_coords = split_image_into_4_blocks(y_noisy, overlap=overlap_pixels)
+    # guide_blocks, _ = split_image_into_4_blocks(guide_img, overlap=overlap_pixels)
+    #
+    # denoised_blocks = [None] * 4
+    #
+    # # 2. 并行处理 (使用 4 个进程)
+    # print("启动 4 进程并行处理...")
+    # t_start_parallel = time.time()
+    #
+    # # ProcessPoolExecutor 可以绕过 Python 的 GIL，实现真正的多核计算
+    # with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+    #     # 提交 4 个任务
+    #     futures = []
+    #     for i in range(4):
+    #         future = executor.submit(
+    #             process_single_block,
+    #             i, noisy_blocks[i], guide_blocks[i],
+    #             K, patch_size, process_step, sigma_norm, a_val
+    #         )
+    #         futures.append(future)
+    #
+    #     # 收集结果
+    #     for future in concurrent.futures.as_completed(futures):
+    #         block_idx, result_block = future.result()
+    #         denoised_blocks[block_idx] = result_block
+    #
+    # print(f"并行处理完成，耗时: {time.time() - t_start_parallel:.2f}s")
+    #
+    # # 3. 图像融合 (Merge)
+    # H, W = y.shape
+    # numerator = np.zeros((H, W), dtype=np.float32)
+    # denominator = np.zeros((H, W), dtype=np.float32)
+    #
+    # for i in range(4):
+    #     y0, y1, x0, x1 = block_coords[i]
+    #
+    #     # 直接把处理好的子图加进去，不需要任何 mask！
+    #     numerator[y0:y1, x0:x1] += denoised_blocks[i]
+    #
+    #     # 这个区域的计数器统一加 1
+    #     denominator[y0:y1, x0:x1] += 1.0
+    #
+    #     # 取平均：
+    #     # 重叠区域由于被加了多次，denominator 自然会是 2 或 4
+    #     # 边缘和非重叠区域 denominator 自然是 1
+    # y_denoised = numerator / denominator
+    # y_denoised = np.clip(y_denoised, 0, 1)
+    #
+    # # ==========================================
+    # # 评估与可视化
+    # # ==========================================
+    # showPic(clean_img_cv, y, y_noisy, cb, cr, y_denoised, img_save_dir, idx)
+    # current_psnr = psnr(y, y_denoised, data_range=1.0)
+    # current_ssim = ssim(y, y_denoised, data_range=1.0)
+    # print(f"\nFinal PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
+    #
+    # plt.figure(figsize=(15, 5))
+    # plt.subplot(1, 3, 1)
+    # plt.title("Clean (Ground Truth)")
+    # plt.imshow(y, cmap='gray')
+    # plt.axis('off')
+    #
+    # plt.subplot(1, 3, 2)
+    # plt.title(f"Noisy (Sigma={sigma_val})")
+    # plt.imshow(y_noisy, cmap='gray')
+    # plt.axis('off')
+    #
+    # plt.subplot(1, 3, 3)
+    # plt.title("Parallel BM3D 1st Stage")
+    # plt.imshow(y_denoised, cmap='gray')
+    # plt.axis('off')
+    #
+    # plt.tight_layout()
+    # plt.show()
 
+
+
+    ###### 循环测试
+    import cv2
+    import numpy as np
+    import time
+    import concurrent.futures
+    import csv
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+
+    # 假设这里已经导入了你自定义的函数
+    # from your_module import read_png_to_yuv, add_poisson_gaussian_noise, split_image_into_4_blocks, process_single_block, showPic, psnr, ssim
+
+    dataset_path = "data/PhotoCD_PCD0992"
+    img_save_dir = Path(dataset_path) / "results"
+    img_save_dir.mkdir(parents=True, exist_ok=True)
+
+    # CSV 保存路径
+    csv_file_path = Path(dataset_path) / "bm3d_results.csv"
+
+    # 算法参数
     sigma_val = 25
     sigma_norm = sigma_val / 255.0
     a_val = 0.02
     K = 7
     patch_size = 7
     process_step = 2
-    overlap_pixels = 39  # 设置你想要的重叠像素
+    overlap_pixels = 39
 
-    np.random.seed(42)
-    img_noisy = add_poisson_gaussian_noise(img_clean, a=a_val, sigma_norm=sigma_norm, seed=42)
-    guide_img = cv2.GaussianBlur(img_noisy, (5, 5), 1.5)
+    # 打开 CSV 文件准备写入
+    with open(csv_file_path, mode='w', newline='', encoding='utf-8') as csv_file:
+        writer = csv.writer(csv_file)
+        # 【改动 1】写入表头，增加 Time(s)
+        writer.writerow(['Image_Index', 'Time(s)', 'PSNR(dB)', 'SSIM'])
 
-    # ==========================================
-    # 分治策略 (Divide and Conquer)
-    # ==========================================
+        # 循环遍历 1 到 23
+        for idx in range(1, 24):
+            print(f"\n{'=' * 20} 开始处理图片 {idx:02d} {'=' * 20}")
 
-    # 1. 切分为 4 块
-    noisy_blocks, block_coords = split_image_into_4_blocks(img_noisy, overlap=overlap_pixels)
-    guide_blocks, _ = split_image_into_4_blocks(guide_img, overlap=overlap_pixels)
+            clean_path = Path(dataset_path) / f"{idx:02d}.png"
+            y, cb, cr, clean_img_cv = read_png_to_yuv(clean_path)
 
-    denoised_blocks = [None] * 4
+            if clean_img_cv is None:
+                print(f"警告：找不到路径为 {clean_path} 的图片，跳过此图。")
+                continue
 
-    # 2. 并行处理 (使用 4 个进程)
-    print("启动 4 进程并行处理...")
-    t_start_parallel = time.time()
+            np.random.seed(42)
+            y_noisy = add_poisson_gaussian_noise(y, a=a_val, sigma_norm=sigma_norm, seed=42)
+            guide_img = cv2.GaussianBlur(y_noisy, (5, 5), 1.5)
 
-    # ProcessPoolExecutor 可以绕过 Python 的 GIL，实现真正的多核计算
-    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
-        # 提交 4 个任务
-        futures = []
-        for i in range(4):
-            future = executor.submit(
-                process_single_block,
-                i, noisy_blocks[i], guide_blocks[i],
-                K, patch_size, process_step, sigma_norm, a_val
-            )
-            futures.append(future)
+            # ==========================================
+            # 分治策略 (Divide and Conquer)
+            # ==========================================
 
-        # 收集结果
-        for future in concurrent.futures.as_completed(futures):
-            block_idx, result_block = future.result()
-            denoised_blocks[block_idx] = result_block
+            # 1. 切分为 4 块
+            noisy_blocks, block_coords = split_image_into_4_blocks(y_noisy, overlap=overlap_pixels)
+            guide_blocks, _ = split_image_into_4_blocks(guide_img, overlap=overlap_pixels)
 
-    print(f"并行处理完成，耗时: {time.time() - t_start_parallel:.2f}s")
+            denoised_blocks = [None] * 4
 
-    # 3. 图像融合 (Merge)
-    H, W = img_clean.shape
-    numerator = np.zeros((H, W), dtype=np.float32)
-    denominator = np.zeros((H, W), dtype=np.float32)
+            # 2. 并行处理 (使用 4 个进程)
+            t_start_parallel = time.time()
 
-    for i in range(4):
-        y0, y1, x0, x1 = block_coords[i]
+            with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+                futures = []
+                for i in range(4):
+                    future = executor.submit(
+                        process_single_block,
+                        i, noisy_blocks[i], guide_blocks[i],
+                        K, patch_size, process_step, sigma_norm, a_val
+                    )
+                    futures.append(future)
 
-        # 直接把处理好的子图加进去，不需要任何 mask！
-        numerator[y0:y1, x0:x1] += denoised_blocks[i]
+                # 收集结果
+                for future in concurrent.futures.as_completed(futures):
+                    block_idx, result_block = future.result()
+                    denoised_blocks[block_idx] = result_block
 
-        # 这个区域的计数器统一加 1
-        denominator[y0:y1, x0:x1] += 1.0
+            # 【改动 2】计算并记录耗时
+            duration = time.time() - t_start_parallel
+            print(f"并行处理完成，耗时: {duration:.2f}s")
 
-        # 取平均：
-        # 重叠区域由于被加了多次，denominator 自然会是 2 或 4
-        # 边缘和非重叠区域 denominator 自然是 1
-    img_denoised = numerator / denominator
-    img_denoised = np.clip(img_denoised, 0, 1)
+            # 3. 图像融合 (Merge)
+            H, W = y.shape
+            numerator = np.zeros((H, W), dtype=np.float32)
+            denominator = np.zeros((H, W), dtype=np.float32)
 
-    # ==========================================
-    # 评估与可视化
-    # ==========================================
-    current_psnr = psnr(img_clean, img_denoised, data_range=1.0)
-    current_ssim = ssim(img_clean, img_denoised, data_range=1.0)
-    print(f"\nFinal PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
+            for i in range(4):
+                y0, y1, x0, x1 = block_coords[i]
+                numerator[y0:y1, x0:x1] += denoised_blocks[i]
+                denominator[y0:y1, x0:x1] += 1.0
 
-    plt.figure(figsize=(15, 5))
-    plt.subplot(1, 3, 1)
-    plt.title("Clean (Ground Truth)")
-    plt.imshow(img_clean, cmap='gray')
-    plt.axis('off')
+            y_denoised = numerator / denominator
+            y_denoised = np.clip(y_denoised, 0, 1)
 
-    plt.subplot(1, 3, 2)
-    plt.title(f"Noisy (Sigma={sigma_val})")
-    plt.imshow(img_noisy, cmap='gray')
-    plt.axis('off')
+            # ==========================================
+            # 评估与记录
+            # ==========================================
+            current_psnr = psnr(y, y_denoised, data_range=1.0)
+            current_ssim = ssim(y, y_denoised, data_range=1.0)
 
-    plt.subplot(1, 3, 3)
-    plt.title("Parallel BM3D 1st Stage")
-    plt.imshow(img_denoised, cmap='gray')
-    plt.axis('off')
+            print(f"Final PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}")
 
-    plt.tight_layout()
-    plt.show()
+            # 【改动 3】将耗时(duration)一同写入 CSV
+            writer.writerow([idx, round(duration, 2), round(current_psnr, 2), round(current_ssim, 4)])
+            csv_file.flush()
+
+            # 保存中间结果和对比图
+            showPic(clean_img_cv, y, y_noisy, cb, cr, y_denoised, img_save_dir, idx)
+
+            plt.figure(figsize=(15, 5))
+            plt.subplot(1, 3, 1)
+            plt.title("Clean (Ground Truth)")
+            plt.imshow(y, cmap='gray')
+            plt.axis('off')
+
+            plt.subplot(1, 3, 2)
+            plt.title(f"Noisy (Sigma={sigma_val})")
+            plt.imshow(y_noisy, cmap='gray')
+            plt.axis('off')
+
+            plt.subplot(1, 3, 3)
+            plt.title("Parallel BM3D 1st Stage")
+            plt.imshow(y_denoised, cmap='gray')
+            plt.axis('off')
+
+            plt.tight_layout()
+            plot_save_path = img_save_dir / f"{idx:02d}_plot.png"
+            plt.savefig(plot_save_path)
+            plt.close()
+
+    print(f"\n所有处理已完成，结果已保存至：{csv_file_path}")

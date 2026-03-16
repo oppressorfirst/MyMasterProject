@@ -6,6 +6,24 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
+
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+from numba import njit, prange
+from tqdm import tqdm, trange
+from pathlib import Path
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import numpy as np
+import csv
+from numba import njit, prange
+import time
+from scipy.fft import dctn, idctn  # 引入 3D 变换库
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity as ssim
+import concurrent.futures
 
 # -------------------------
 # 读取 PNG 并返回 YUV
@@ -116,77 +134,97 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
     cv2.imwrite(os.path.join(img_save_dir, f"full_process_{idx:02d}.png"), final_canvas)
 
 
-# -------------------------
-# 主循环
-# -------------------------
-# results = []
-# dataset = "PhotoCD_PCD0992"
-# img_save_dir = f"out/images/bm3d_baseline_HARD_THRESHOLDING/{dataset}"
-# res_save_dir = "out/results"
-#
-# # 关键修改：确保文件夹存在
-# os.makedirs(img_save_dir, exist_ok=True)
-# os.makedirs(res_save_dir, exist_ok=True)
-#
-# for i in range(1, 25):
-#     image_path = f"data/{dataset}/{i:02d}.png"
-#     if not os.path.exists(image_path): continue
-#
-#     y, cb, cr, img_bgr = read_png_to_yuv(image_path)
-#
-#     sigma = 25
-#     sigma_norm = sigma / 255.0
-#     y_noise = add_awgn_noise(y, sigma)
-#
-#     # BM3D 这里的 z 接受 [0,1] 范围
-#     denoised_y_norm = bm3d.bm3d(
-#         z=y_noise,
-#         sigma_psd=sigma_norm,
-#         stage_arg=bm3d.BM3DStages.HARD_THRESHOLDING
-#     )
-#     y_denoised = np.clip(denoised_y_norm, 0, 1)
-#
-#     # 调用显示函数
-#     showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, i)
-#
-#     # 使用裁剪后的图像计算指标
-#     current_psnr = psnr(y, y_denoised, data_range=1.0)
-#     current_ssim = ssim(y, y_denoised, data_range=1.0)
-#
-#     results.append({
-#         'No': f"{i:02d}",
-#         'Sigma': sigma,
-#         'PSNR': round(current_psnr, 2),
-#         'SSIM': round(current_ssim, 4)
-#     })
-#     print(f"PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
-#
-# # 保存结果
-# df = pd.DataFrame(results)
-# csv_path = os.path.join(res_save_dir, f"bm3d_HARD_THRESHOLDING_results_{dataset}.csv")
-# df.to_csv(csv_path, index=False)
-# print(f"所有结果已成功保存到 {csv_path}")
+# image_path = f"data/PhotoCD_PCD0992/03.png"
+# y, cb, cr, img_bgr = read_png_to_yuv(image_path)
+# sigma = 25
+# sigma_norm = sigma / 255.0
+# y_noise = add_poisson_gaussian_noise(y, a=0.02, sigma_norm=sigma_norm, seed=42)
+# # BM3D 这里的 z 接受 [0,1] 范围
+# denoised_y_norm = bm3d.bm3d(
+#     z=y_noise,
+#     sigma_psd=sigma_norm,
+#     stage_arg=bm3d.BM3DStages.HARD_THRESHOLDING
+# )
+# y_denoised = np.clip(denoised_y_norm, 0, 1)
+# # 调用显示函数
+# # showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, i)
+# # 使用裁剪后的图像计算指标
+# plt.imshow(y_denoised, cmap='gray');
+# plt.axis('off')
+# plt.tight_layout()
+# plt.show()
+# current_psnr = psnr(y, y_denoised, data_range=1.0)
+# current_ssim = ssim(y, y_denoised, data_range=1.0)
+# print(f"PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
 
 
-image_path = f"data/classic_photo/lena_gray.png"
-y, cb, cr, img_bgr = read_png_to_yuv(image_path)
-sigma = 15
+dataset_path = "data/PhotoCD_PCD0992"
+img_save_dir = Path(dataset_path) / "results"
+img_save_dir.mkdir(parents=True, exist_ok=True)
+
+# 换一个 CSV 文件名，以免覆盖你之前的并行版本结果
+csv_file_path = Path(dataset_path) / "bm3d_lib_results.csv"
+
+# 算法参数
+sigma = 25
 sigma_norm = sigma / 255.0
-y_noise = add_poisson_gaussian_noise(y, a=0.015, sigma_norm=sigma_norm, seed=42)
-# BM3D 这里的 z 接受 [0,1] 范围
-denoised_y_norm = bm3d.bm3d(
-    z=y_noise,
-    sigma_psd=sigma_norm,
-    stage_arg=bm3d.BM3DStages.HARD_THRESHOLDING
-)
-y_denoised = np.clip(denoised_y_norm, 0, 1)
-# 调用显示函数
-# showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, i)
-# 使用裁剪后的图像计算指标
-plt.imshow(y_denoised, cmap='gray');
-plt.axis('off')
-plt.tight_layout()
-plt.show()
-current_psnr = psnr(y, y_denoised, data_range=1.0)
-current_ssim = ssim(y, y_denoised, data_range=1.0)
-print(f"PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
+a_val = 0.02
+
+# 打开 CSV 文件准备写入
+with open(csv_file_path, mode='w', newline='', encoding='utf-8') as csv_file:
+    writer = csv.writer(csv_file)
+    # 写入表头，包含时间、PSNR、SSIM
+    writer.writerow(['Image_Index', 'Time(s)', 'PSNR(dB)', 'SSIM'])
+
+    # 循环遍历 1 到 23
+    for idx in range(1, 24):
+        print(f"\n{'=' * 20} 开始处理图片 {idx:02d} (官方库) {'=' * 20}")
+
+        image_path = Path(dataset_path) / f"{idx:02d}.png"
+        y, cb, cr, img_bgr = read_png_to_yuv(image_path)
+
+        if img_bgr is None:
+            print(f"警告：找不到路径为 {image_path} 的图片，跳过此图。")
+            continue
+
+        # 加噪
+        y_noise = add_poisson_gaussian_noise(y, a=a_val, sigma_norm=sigma_norm, seed=42)
+
+        # 记录开始时间
+        t_start = time.time()
+
+        # BM3D 这里的 z 接受 [0,1] 范围
+        denoised_y_norm = bm3d.bm3d(
+            z=y_noise,
+            sigma_psd=sigma_norm,
+            stage_arg=bm3d.BM3DStages.HARD_THRESHOLDING
+        )
+        y_denoised = np.clip(denoised_y_norm, 0, 1)
+
+        # 记录耗时
+        duration = time.time() - t_start
+        print(f"库函数处理完成，耗时: {duration:.2f}s")
+
+        # 计算指标
+        current_psnr = psnr(y, y_denoised, data_range=1.0)
+        current_ssim = ssim(y, y_denoised, data_range=1.0)
+        print(f"PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}")
+
+        # 写入 CSV 并实时保存
+        writer.writerow([idx, round(duration, 2), round(current_psnr, 2), round(current_ssim, 4)])
+        csv_file.flush()
+
+        # 可选：如果还需要调用你的详细比对保存函数，取消下面这行注释
+        # showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx)
+
+        # 绘制当前降噪图并保存，替代阻塞程序的 plt.show()
+        plt.figure(figsize=(6, 6))
+        plt.imshow(y_denoised, cmap='gray')
+        plt.axis('off')
+        plt.tight_layout()
+
+        plot_save_path = img_save_dir / f"{idx:02d}_lib_denoised.png"
+        plt.savefig(plot_save_path)
+        plt.close()  # 防止内存泄漏
+
+print(f"\n所有处理已完成，库函数结果已保存至：{csv_file_path}")
