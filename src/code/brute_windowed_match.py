@@ -63,7 +63,7 @@ def add_poisson_gaussian_noise(img_clean, a=0.1, sigma_norm=25/255, seed=None):
 # =========================
 # Step 1 - CONFIG
 # =========================
-clean_path = "data/classic_photo/lena_gray.png"
+clean_path = "data/PhotoCD_PCD0992/01.png"
 clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
 if clean_path is None:
     print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
@@ -77,7 +77,7 @@ noisy_img_float = add_poisson_gaussian_noise(img_clean, a=0.02,sigma_norm=sigma_
 
 
 patch_size = 8
-top_k = 8
+top_k = 16
 window_size = 39
 
 stride = patch_size // 2  # 不重叠

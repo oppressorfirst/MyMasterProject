@@ -9,18 +9,80 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
+import csv
 from numba import njit, prange
 import time
 from scipy.fft import dctn, idctn  # 引入 3D 变换库
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
-import cv2
-import numpy as np
-import time
 import concurrent.futures
-import csv
-from pathlib import Path
-import matplotlib.pyplot as plt
+import pywt
+
+
+def forward_gat(z, a, sigma):
+    """
+    广义 Anscombe 变换 (GAT)
+    将泊松-高斯混合噪声转化为近似标准差为 1 的高斯白噪声。
+    """
+    return 2.0 * np.sqrt(np.maximum(z / a + 3.0 / 8.0 + (sigma ** 2) / (a ** 2), 0))
+
+def inverse_gat(D, a, sigma):
+    """
+    GAT 的渐近逆变换 (Asymptotic Inverse)
+    将去噪后的高斯域信号映射回原始的泊松-高斯域。
+    """
+    return a * ((D / 2.0) ** 2 - 1.0 / 8.0 - (sigma ** 2) / (a ** 2))
+
+def split_image_into_4_blocks(img, overlap=39):
+    """
+    将图像分成上下左右 4 块，包含指定的像素重叠。
+    返回: 4个子图构成的列表，以及它们在原图中的切片坐标。
+    """
+    H, W = img.shape[:2]
+    mid_H, mid_W = H // 2, W // 2
+
+    # 定义四个块的边界 (y_start, y_end, x_start, x_end)
+    coords = [
+        (0, mid_H + overlap, 0, mid_W + overlap),  # Top-Left
+        (0, mid_H + overlap, mid_W - overlap, W),  # Top-Right
+        (mid_H - overlap, H, 0, mid_W + overlap),  # Bottom-Left
+        (mid_H - overlap, H, mid_W - overlap, W)  # Bottom-Right
+    ]
+
+    blocks = []
+    for (y0, y1, x0, x1) in coords:
+        blocks.append(img[y0:y1, x0:x1].copy())
+
+    return blocks, coords
+
+
+
+
+
+def process_single_block(block_idx, noisy_vst_block, guide_vst_block, K, patch_size, process_step):
+    """
+    包装单个块的处理流程（在 VST 域上操作）。
+    """
+    print(f"\n--- [Worker {block_idx}] 开始处理 ---")
+
+    # 注意：此时传入 AKNN 和 BM3D 的都是 VST 变换后的图像
+    offsets, dists = initialize_aknn(guide_vst_block, K, patch_size, step=process_step)
+
+    # AKNN 的随机搜索半径逻辑保持不变
+    final_offsets, final_dists = run_aknn_pure_python(
+        guide_vst_block, offsets, dists, 2, patch_size, sigma_norm=1.0, step=process_step
+    )
+
+    # 运行 VST 域专用的 BM3D
+    denoised_vst_block = bm3d_1st_stage_vst_offsets(
+        img_vst=noisy_vst_block,
+        offsets=final_offsets,
+        patch_size=patch_size,
+        step=process_step
+    )
+
+    print(f"--- [Worker {block_idx}] 处理完成 ---")
+    return block_idx, denoised_vst_block
 
 def visualize_block_by_index(img, block_idx, offsets, patch_size, step):
     """
@@ -332,89 +394,75 @@ def add_poisson_gaussian_noise(img_clean, a=0.1, sigma_norm=25/255, seed=None):
     return np.clip(noisy_img, 0.0, 1.0).astype(np.float32)
 
 
-def bm3d_1st_stage_poisson_gaussian_offsets(img, offsets, patch_size, a, sigma_norm, step=3):
+def bm3d_1st_stage_vst_offsets(img_vst, offsets, patch_size, step=3):
     """
-    接收 AKNN offsets 的泊松-高斯自适应 BM3D 降噪
+    接收 AKNN offsets 的 VST 域 BM3D 降噪。
+    由于输入图像经过了 VST，此时全局噪声标准差 sigma_vst 恒等于 1.0。
     """
-    H, W = img.shape
+    H, W = img_vst.shape
     K_offsets = offsets.shape[2]
     r = patch_size // 2
 
-    numerator = np.zeros_like(img, dtype=np.float64)
-    denominator = np.zeros_like(img, dtype=np.float64)
+    numerator = np.zeros_like(img_vst, dtype=np.float64)
+    denominator = np.zeros_like(img_vst, dtype=np.float64)
 
-    print("\nStarting Adaptive BM3D 1st Stage with Offsets...")
+    print("\nStarting BM3D 1st Stage on VST domain...")
 
-    # 使用步长 step 遍历图像，极大节省 3D 变换的计算量
+    # 【核心改进】：VST 域的全局噪声标准差被稳定为 1.0
+    sigma_vst = 1.0
+    lambda_3d = 2.7 * sigma_vst
+    sigma_vst2 = sigma_vst ** 2
+
     for y in trange(r, H - r, step, desc="BM3D 3D Transform"):
         for x in range(r, W - r, step):
-
-            # 1. 整理坐标：【关键】把参考块自身 (y, x) 强制放在第 0 层！
             coords = [(y, x)]
 
-            # 遍历 offsets 提取这一个像素的 K 个相似块坐标
             for k in range(K_offsets):
                 dy, dx = offsets[y, x, k]
                 ny, nx = y + dy, x + dx
-
-                # 越界检查 (只保留在图像内部的块)
-                # 使用通用的边界计算，兼容奇偶数 patch_size
                 if r <= ny <= H - patch_size + r and r <= nx <= W - patch_size + r:
                     coords.append((ny, nx))
 
             K_actual = len(coords)
             if K_actual <= 1:
-                continue  # 如果除了自己以外没找到合法的，就跳过
+                continue
 
-            # 2. 堆叠成 3D 张量
             group_3d = np.zeros((K_actual, patch_size, patch_size), dtype=np.float64)
             for i, (cy, cx) in enumerate(coords):
-                group_3d[i] = img[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size]
+                group_3d[i] = img_vst[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size]
 
-            # ========================================================
-            # 【核心改进 1：估计局部亮度与局部噪声标准差】
-            # ========================================================
-            local_mean = np.mean(group_3d[0])
-            local_mean = max(local_mean, 0.0)
+            # 3. 混合 3D 变换
+            group_2d_dct = dctn(group_3d, axes=(1, 2), norm='ortho')
+            haar_coeffs = pywt.wavedec(group_2d_dct, 'haar', mode='symmetric', axis=0)
 
-            # 【已修复！】高斯噪声的方差必须是 sigma_norm 的平方
-            local_sigma2 = a * local_mean + (sigma_norm ** 2)
-            local_sigma = np.sqrt(max(local_sigma2, 1e-10))
+            # 4. 全局硬阈值截断 (使用固定的 lambda_3d)
+            n_nonzero = 0
+            for i in range(len(haar_coeffs)):
+                haar_coeffs[i][np.abs(haar_coeffs[i]) < lambda_3d] = 0
+                n_nonzero += np.sum(haar_coeffs[i] != 0)
 
-            # 动态计算当前 3D 块的硬阈值
-            lambda_3d_local = 2.7 * local_sigma
-            # ========================================================
-
-            # 3. 3D 变换 (使用 3D DCT)
-            group_3d_freq = dctn(group_3d, norm='ortho')
-
-            # 4. 自适应硬阈值截断
-            group_3d_freq[np.abs(group_3d_freq) < lambda_3d_local] = 0
-
-            # ========================================================
-            # 【核心改进 2：自适应聚合权重】
-            # ========================================================
-            n_nonzero = np.sum(group_3d_freq != 0)
+            # 5. 计算聚合权重 (使用固定的 sigma_vst2)
             if n_nonzero > 0:
-                weight = 1.0 / (n_nonzero * local_sigma2)
+                weight = 1.0 / (n_nonzero * sigma_vst2)
             else:
-                weight = 1.0 / local_sigma2
-            # ========================================================
+                weight = 1.0 / sigma_vst2
 
-            # 6. 逆 3D 变换
-            group_3d_denoised = idctn(group_3d_freq, norm='ortho')
+            # 6. 逆向混合变换
+            group_1d_inv = pywt.waverec(haar_coeffs, 'haar', mode='symmetric', axis=0)
+            group_1d_inv = group_1d_inv[:K_actual, :, :]
+            group_3d_denoised = idctn(group_1d_inv, axes=(1, 2), norm='ortho')
 
-            # 7. 聚合 (把去噪后的块加权贴回原图)
+            # 7. 聚合
             for i, (cy, cx) in enumerate(coords):
                 numerator[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size] += group_3d_denoised[i] * weight
                 denominator[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size] += weight
 
-    # 8. 归一化输出
     mask = denominator > 0
-    denoised_img = img.copy()
+    denoised_img = img_vst.copy()
     denoised_img[mask] = numerator[mask] / denominator[mask]
 
-    return np.clip(denoised_img, 0, 1)
+    return denoised_img
+
 
 def read_png_to_yuv(path, normalize=True):
     img = cv2.imread(path)
@@ -481,106 +529,132 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
         ty = (i // 4) * h + 30
         cv2.putText(final_canvas, text, (tx, ty), font, 0.7, (0, 255, 0), 2)
 
-    cv2.imwrite(os.path.join(img_save_dir, f"AKNN_BM3D_nodiv_k_7_step_2_{idx:02d}.png"), final_canvas)
-
+    cv2.imwrite(os.path.join(img_save_dir, f"AKNN_BM3D_haar_VST__k_7_step_4_{idx:02d}.png"), final_canvas)
 
 if __name__ == "__main__":
 
-    # clean_path = "data/classic_photo/lena_gray_right_down.png"
-    # clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
-    # if clean_path is None:
-    #     print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
-    # img_clean = clean_img_cv.astype(np.float32) / 255.0
-    #
-    # sigma_val = 25
-    # sigma_norm = sigma_val / 255.0
-    # np.random.seed(42)  # 固定种子方便复现
-    # img_noisy = add_poisson_gaussian_noise(img_clean, a=0.02, sigma_norm=sigma_norm, seed=42)
-    # #noise = np.random.normal(0, sigma_norm, img_clean.shape)
-    # #img_noisy = np.clip(img_clean + noise, 0, 1)
-    #
-    # guide_img = cv2.GaussianBlur(img_noisy, (5, 5), 1.5)
-    # K = 7  # 我们想找 5 个最近邻
-    # patch_size = 7 # 补丁大小
-    # process_step = 2
-    #
-    #
-    # offsets, dists = initialize_aknn(guide_img, K, patch_size, step=process_step)
-    #
-    # final_offsets, final_dists = run_aknn_pure_python(
-    #     guide_img, offsets, dists, 2, patch_size, sigma_norm, step=process_step
-    # )
-    # visualize_block_by_index(
-    #     img_noisy,
-    #     block_idx=244,
-    #     offsets=final_offsets,
-    #     patch_size=patch_size,
-    #     step=process_step
-    # )
-    #
-    # # 你还可以随意试几个别的块，比如第 10 个和第 500 个
-    # visualize_block_by_index(img_noisy, 10, final_offsets, patch_size, process_step)
-    # visualize_block_by_index(img_noisy, 500, final_offsets, patch_size, process_step)
-    #
-    # # img_denoised = bm3d_1st_stage(
-    # #     noisy_img=img_noisy,
-    # #     offsets=final_offsets,
-    # #     patch_size=patch_size,
-    # #     sigma=sigma_norm,
-    # #     step=1  # 步长为 3 提速
-    # # )
-    #
-    # img_denoised = bm3d_1st_stage_poisson_gaussian_offsets(
-    #     img=img_noisy,
-    #     offsets=final_offsets,
-    #     patch_size=patch_size,
-    #     a=0.03,
-    #     sigma_norm=sigma_norm,
-    #     step=process_step  # 这里与上面的 step=4 保持一致
-    # )
-    #
-    # current_psnr = psnr(img_clean, img_denoised, data_range=1.0)
-    # current_ssim = ssim(img_clean, img_denoised, data_range=1.0)
-    # print(f"PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
-    # # 5. 可视化对比
-    # plt.figure(figsize=(15, 5))
-    # plt.subplot(1, 3, 1);
-    # plt.title("Clean (Ground Truth)");
-    # plt.imshow(img_clean, cmap='gray');
-    # plt.axis('off')
-    # plt.subplot(1, 3, 2);
-    # plt.title(f"Noisy (Sigma={sigma_val})");
-    # plt.imshow(img_noisy, cmap='gray');
-    # plt.axis('off')
-    # plt.subplot(1, 3, 3);
-    # plt.title("BM3D 1st Stage Denoised");
-    # plt.imshow(img_denoised, cmap='gray');
-    # plt.axis('off')
-    # plt.tight_layout()
-    # plt.show()
-    #
+    # idx = 3
     # dataset_path = "data/PhotoCD_PCD0992"
+    # clean_path = Path(dataset_path) / f"{idx:02d}.png"
     # img_save_dir = Path(dataset_path) / "results"
-    # img_save_dir.mkdir(parents=True, exist_ok=True)
     #
-    # # CSV 保存路径
-    # csv_file_path = Path(dataset_path) / "AKNN_bm3d_haar_VST_results_k_15_step_2.csv"
+    # y, cb, cr, clean_img_cv = read_png_to_yuv(clean_path)
+    # if clean_img_cv is None:
+    #     print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
+    #     exit()
     #
-    # # 算法参数
     # sigma_val = 25
     # sigma_norm = sigma_val / 255.0
     # a_val = 0.02
-    # K = 15
+    # K = 7
     # patch_size = 7
     # process_step = 2
-    # overlap_pixels = 39
+    # overlap_pixels = 39  # 设置你想要的重叠像素
+    #
+    # np.random.seed(42)
+    # y_noisy = add_poisson_gaussian_noise(y, a=a_val, sigma_norm=sigma_norm, seed=42)
+    # guide_img = cv2.GaussianBlur(y_noisy, (5, 5), 1.5)
+    #
+    # # ==========================================
+    # # 分治策略 (Divide and Conquer)
+    # # ==========================================
+    #
+    # # 1. 切分为 4 块
+    # noisy_blocks, block_coords = split_image_into_4_blocks(y_noisy, overlap=overlap_pixels)
+    # guide_blocks, _ = split_image_into_4_blocks(guide_img, overlap=overlap_pixels)
+    #
+    # denoised_blocks = [None] * 4
+    #
+    # # 2. 并行处理 (使用 4 个进程)
+    # print("启动 4 进程并行处理...")
+    # t_start_parallel = time.time()
+    #
+    # # ProcessPoolExecutor 可以绕过 Python 的 GIL，实现真正的多核计算
+    # with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+    #     # 提交 4 个任务
+    #     futures = []
+    #     for i in range(4):
+    #         future = executor.submit(
+    #             process_single_block,
+    #             i, noisy_blocks[i], guide_blocks[i],
+    #             K, patch_size, process_step, sigma_norm, a_val
+    #         )
+    #         futures.append(future)
+    #
+    #     # 收集结果
+    #     for future in concurrent.futures.as_completed(futures):
+    #         block_idx, result_block = future.result()
+    #         denoised_blocks[block_idx] = result_block
+    #
+    # print(f"并行处理完成，耗时: {time.time() - t_start_parallel:.2f}s")
+    #
+    # # 3. 图像融合 (Merge)
+    # H, W = y.shape
+    # numerator = np.zeros((H, W), dtype=np.float32)
+    # denominator = np.zeros((H, W), dtype=np.float32)
+    #
+    # for i in range(4):
+    #     y0, y1, x0, x1 = block_coords[i]
+    #
+    #     # 直接把处理好的子图加进去，不需要任何 mask！
+    #     numerator[y0:y1, x0:x1] += denoised_blocks[i]
+    #
+    #     # 这个区域的计数器统一加 1
+    #     denominator[y0:y1, x0:x1] += 1.0
+    #
+    #     # 取平均：
+    #     # 重叠区域由于被加了多次，denominator 自然会是 2 或 4
+    #     # 边缘和非重叠区域 denominator 自然是 1
+    # y_denoised = numerator / denominator
+    # y_denoised = np.clip(y_denoised, 0, 1)
+    #
+    # # ==========================================
+    # # 评估与可视化
+    # # ==========================================
+    # showPic(clean_img_cv, y, y_noisy, cb, cr, y_denoised, img_save_dir, idx)
+    # current_psnr = psnr(y, y_denoised, data_range=1.0)
+    # current_ssim = ssim(y, y_denoised, data_range=1.0)
+    # print(f"\nFinal PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
+    #
+    # plt.figure(figsize=(15, 5))
+    # plt.subplot(1, 3, 1)
+    # plt.title("Clean (Ground Truth)")
+    # plt.imshow(y, cmap='gray')
+    # plt.axis('off')
+    #
+    # plt.subplot(1, 3, 2)
+    # plt.title(f"Noisy (Sigma={sigma_val})")
+    # plt.imshow(y_noisy, cmap='gray')
+    # plt.axis('off')
+    #
+    # plt.subplot(1, 3, 3)
+    # plt.title("Parallel BM3D 1st Stage")
+    # plt.imshow(y_denoised, cmap='gray')
+    # plt.axis('off')
+    #
+    # plt.tight_layout()
+    # plt.show()
+
+
+
+    ###### 循环测试
+    import cv2
+    import numpy as np
+    import time
+    import concurrent.futures
+    import csv
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+
+    # 假设这里已经导入了你自定义的函数
+    # from your_module import read_png_to_yuv, add_poisson_gaussian_noise, split_image_into_4_blocks, process_single_block, showPic, psnr, ssim
 
     dataset_path = "data/PhotoCD_PCD0992"
     img_save_dir = Path(dataset_path) / "results"
     img_save_dir.mkdir(parents=True, exist_ok=True)
 
     # CSV 保存路径
-    csv_file_path = Path(dataset_path) / "AKNN_bm3d_nodiv_results_k_7_step_2.csv"
+    csv_file_path = Path(dataset_path) / "AKNN_bm3d_haar_VST_results_k_7_step_4.csv"
 
     # 算法参数
     sigma_val = 25
@@ -588,7 +662,7 @@ if __name__ == "__main__":
     a_val = 0.02
     K = 7
     patch_size = 7
-    process_step = 2
+    process_step = 4
     overlap_pixels = 39
 
     # 打开 CSV 文件准备写入
@@ -614,35 +688,56 @@ if __name__ == "__main__":
             # ==========================================
             # 【新增】1. 正向 VST 变换
             # ==========================================
+            y_noisy_vst = forward_gat(y_noisy, a=a_val, sigma=sigma_norm)
 
             # Guide image 也要在 VST 域生成
-            guide_img = cv2.GaussianBlur(y_noisy, (5, 5), 1.5)
+            guide_img_vst = cv2.GaussianBlur(y_noisy_vst, (5, 5), 1.5)
             # ==========================================
             # 分治策略 (Divide and Conquer)
             # ==========================================
 
+            # 1. 切分为 4 块
+            noisy_blocks, block_coords = split_image_into_4_blocks(y_noisy_vst, overlap=overlap_pixels)
+            guide_blocks, _ = split_image_into_4_blocks(guide_img_vst, overlap=overlap_pixels)
 
-
+            denoised_vst_blocks = [None] * 4
 
             t_start_parallel = time.time()
 
-            offsets, dists = initialize_aknn(guide_img, K, patch_size, step=process_step)
+            with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+                futures = []
+                for i in range(4):
+                    # 注意参数变少了，不再需要传 a_val 和 sigma_norm 给 BM3D
+                    future = executor.submit(
+                        process_single_block,
+                        i, noisy_blocks[i], guide_blocks[i],
+                        K, patch_size, process_step
+                    )
+                    futures.append(future)
 
-            final_offsets, final_dists = run_aknn_pure_python(
-                guide_img, offsets, dists, 2, patch_size, sigma_norm, step=process_step
-            )
+                for future in concurrent.futures.as_completed(futures):
+                    block_idx, result_block = future.result()
+                    denoised_vst_blocks[block_idx] = result_block
 
             duration = time.time() - t_start_parallel
             print(f"并行处理完成，耗时: {duration:.2f}s")
 
-            y_denoised = bm3d_1st_stage_poisson_gaussian_offsets(
-                    img=y_noisy,
-                    offsets=final_offsets,
-                    patch_size=patch_size,
-                    a=0.03,
-                    sigma_norm=sigma_norm,
-                    step=process_step  # 这里与上面的 step=4 保持一致
-                )
+            # 3. 图像融合 (VST域的 Merge)
+            H, W = y.shape
+            numerator = np.zeros((H, W), dtype=np.float32)
+            denominator = np.zeros((H, W), dtype=np.float32)
+
+            for i in range(4):
+                y0, y1, x0, x1 = block_coords[i]
+                numerator[y0:y1, x0:x1] += denoised_vst_blocks[i]
+                denominator[y0:y1, x0:x1] += 1.0
+
+            y_denoised_vst = numerator / denominator
+
+            # ==========================================
+            # 【新增】4. 逆 VST 变换
+            # ==========================================
+            y_denoised = inverse_gat(y_denoised_vst, a=a_val, sigma=sigma_norm)
 
             # 最后必须裁剪回 [0, 1] 范围
             y_denoised = np.clip(y_denoised, 0.0, 1.0)
