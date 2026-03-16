@@ -14,6 +14,41 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 
 
+def visualize_block_by_index(img, block_idx, offsets, patch_size, step):
+    """
+    通过一维的块索引 (0 到 total_blocks-1) 来进行可视化
+    自动计算出合法的 (y, x) 坐标
+    """
+    H, W = img.shape[:2]
+    r = patch_size // 2
+
+    # 提前计算出合法的 y 和 x 坐标列表
+    y_coords = list(range(r, H - r, step))
+    x_coords = list(range(r, W - r, step))
+
+    num_y = len(y_coords)
+    num_x = len(x_coords)
+    total_blocks = num_y * num_x
+
+    # 越界检查
+    if block_idx < 0 or block_idx >= total_blocks:
+        print(f"错误: 索引 {block_idx} 越界。当前网格(step={step})总共有 {total_blocks} 个块。")
+        return
+
+    # 将 1D 索引转换为 2D 的网格索引
+    grid_y_idx = block_idx // num_x
+    grid_x_idx = block_idx % num_x
+
+    # 获取实际的图像 (y, x) 坐标
+    y = y_coords[grid_y_idx]
+    x = x_coords[grid_x_idx]
+
+    print(f"Visualizing Block {block_idx} / {total_blocks} -> Mapped to Pixel (y={y}, x={x})")
+
+    # 调用你原有的可视化函数
+    visualize_pixel_and_candidates(img, y, x, offsets, patch_size)
+
+
 def visualize_pixel_and_candidates(img, y0, x0, offsets, patch_size):
     """
     可视化某个像素的 K 个候选
@@ -96,83 +131,41 @@ def compute_patch_distance(img, y, x, ny, nx, patch_size):
     return dist
 
 
-def initialize_aknn(img, K, patch_size=7):
-    """
-    根据论文描述实现初始化过程。
-
-    参数:
-    img: 输入图像，numpy array, shape (H, W, C)
-    K: 近邻数量 (K-nearest neighbors)
-    patch_size: Patch 的大小
-
-    返回:
-    nn_offsets: 初始化后的偏移量场，shape (H, W, K, 2) -> 最后一维存储 (dy, dx)
-    nn_dists: 对应的距离场，shape (H, W, K)
-    """
-    H, W = img.shape
-
-    # 1. 参数设置: sigma_s = w / 3
+def initialize_aknn(img, K, patch_size=7, step=1):
+    H, W = img.shape[:2]
+    r = patch_size // 2
     sigma_s = W / 3.0
-
-    # 2. 生成随机偏移量 vi = sigma_s * ni (Eqn. 3)
-    # ni 是标准正态分布
-    # shape: (H, W, K, 2)
     ni = np.random.randn(H, W, K, 2)
+    vi = np.round(sigma_s * ni).astype(int)
 
-    # 应用公式
-    vi = sigma_s * ni
-
-    # 偏移量必须是整数（像素坐标）
-    vi = np.round(vi).astype(int)
-
-    print(vi)
-    # 初始化输出容器
-    # nn_offsets 存储 K 个最好的偏移量 (y, x)
     nn_offsets = np.zeros((H, W, K, 2), dtype=int)
-    # nn_dists 存储对应的距离，初始化为无穷大
     nn_dists = np.full((H, W, K), float('inf'))
 
-    print(f"Initializing AKNN for image {H}x{W} with K={K}...")
+    print(f"Initializing AKNN for image {H}x{W} with K={K}, Step={step}...")
 
-    # 3. 填充优先队列 (此处通过排序模拟优先队列)
-    # 由于 Python 循环遍历像素太慢，这里展示逻辑。
-    # 在实际的高性能 Python 实现中，通常会向量化操作。
-
-    # 为了演示清晰，我们遍历每个像素进行初始化
-    # 注意：这步比较耗时，实际工程中通常使用 Numba 或 Cython 加速
-    for y in range(H):
-        for x in range(W):
+    # 【关键修改】：起点设为 r，步长设为 step，与 BM3D 完美对齐
+    for y in tqdm(range(r, H - r, step), desc="Init AKNN"):
+        for x in range(r, W - r, step):
             candidates = []
-
             for k in range(K):
-                # 获取随机生成的偏移量
                 dy, dx = vi[y, x, k]
-
-                # 计算目标坐标
                 ny, nx = y + dy, x + dx
 
-                # 检查边界，如果出界，重新生成一个随机位置（简单的策略）
-                # 或者直接忽略（距离设为 inf）
                 if 0 <= ny < H and 0 <= nx < W:
                     dist = compute_patch_distance(img, y, x, ny, nx, patch_size)
                 else:
                     dist = float('inf')
-                    # 也可以选择此时随机选一个合法的点代替，保证队列不为空
                     ny, nx = np.random.randint(0, H), np.random.randint(0, W)
                     dy, dx = ny - y, nx - x
                     dist = compute_patch_distance(img, y, x, ny, nx, patch_size)
 
                 candidates.append((dist, dy, dx))
 
-            # 4. 维护顺序 (Priority Queue order)
-            # 对 K 个候选者按距离排序 (升序)
             candidates.sort(key=lambda x: x[0])
-
-            # 存入结果矩阵
             for k in range(K):
                 nn_dists[y, x, k] = candidates[k][0]
-                nn_offsets[y, x, k, 0] = candidates[k][1]  # dy
-                nn_offsets[y, x, k, 1] = candidates[k][2]  # dx
+                nn_offsets[y, x, k, 0] = candidates[k][1]
+                nn_offsets[y, x, k, 1] = candidates[k][2]
 
     return nn_offsets, nn_dists
 
@@ -228,24 +221,30 @@ def update_best_k(img, y, x, prop_dy, prop_dx, offsets, dists, patch_size, H, W,
         current_offsets[insert_pos] = [prop_dy, prop_dx]
 
 
-def propagation_step(img, offsets, dists, patch_size, iter_num):
+def propagation_step(img, offsets, dists, patch_size, iter_num, step=1):
     H, W = img.shape[:2]
     K = offsets.shape[2]
-    print(f"  > Propagation (Direction: {'Scanline' if iter_num % 2 == 0 else 'Reverse'})...")
+    r = patch_size // 2
+    print(f"  > Propagation (Direction: {'Scanline' if iter_num % 2 == 0 else 'Reverse'}, Step: {step})...")
 
     if iter_num % 2 == 0:
-        y_range = range(1, H)
-        x_range = range(1, W)
-        neighbor_deltas = [(-1, 0), (0, -1)]
+        # 正向：跳过最外层，每次加 step
+        y_range = range(r + step, H - r, step)
+        x_range = range(r + step, W - r, step)
+        neighbor_deltas = [(-step, 0), (0, -step)] # 看左边和上边 step 距离的邻居
     else:
-        y_range = range(H - 2, -1, -1)
-        x_range = range(W - 2, -1, -1)
-        neighbor_deltas = [(1, 0), (0, 1)]
+        # 反向：计算出正向网格的最后一个点，确保网格点对齐
+        end_y = r + ((H - r - 1 - r) // step) * step
+        end_x = r + ((W - r - 1 - r) // step) * step
+        y_range = range(end_y - step, r - 1, -step)
+        x_range = range(end_x - step, r - 1, -step)
+        neighbor_deltas = [(step, 0), (0, step)] # 看右边和下边 step 距离的邻居
 
     for y in tqdm(y_range, desc=f"    Prop iter{iter_num + 1}", leave=False):
         for x in x_range:
             for dy_n, dx_n in neighbor_deltas:
                 nb_y, nb_x = y + dy_n, x + dx_n
+                # 直接获取对应 step 邻居的偏移量
                 nb_offsets = offsets[nb_y, nb_x]
                 for k in range(K):
                     prop_dy, prop_dx = nb_offsets[k]
@@ -254,13 +253,15 @@ def propagation_step(img, offsets, dists, patch_size, iter_num):
 
 
 # --- 3. 随机搜索步骤 (Random Search) ---
-def random_search_step(img, offsets, dists, patch_size, search_radius):
+def random_search_step(img, offsets, dists, patch_size, search_radius, step=1):
     H, W = img.shape[:2]
     K = offsets.shape[2]
-    print(f"  > Random Search (Radius: {search_radius:.2f})...")
+    r = patch_size // 2
+    print(f"  > Random Search (Radius: {search_radius:.2f}, Step: {step})...")
 
-    for y in tqdm(range(H), desc="    Random", leave=False):
-        for x in range(W):
+    # 【关键修改】：按 step 遍历网格
+    for y in tqdm(range(r, H - r, step), desc="    Random", leave=False):
+        for x in range(r, W - r, step):
             for k in range(K):
                 best_dy, best_dx = offsets[y, x, k]
                 rand_dy = int(round(search_radius * np.random.randn()))
@@ -274,34 +275,23 @@ def random_search_step(img, offsets, dists, patch_size, search_radius):
 
 
 # --- 4. 主程序：把所有步骤串起来 ---
-def run_aknn_pure_python(img, init_offsets, init_dists, iterations, patch_size, sigma_norm):
-    """
-    注意：在入口处需要传入 sigma_norm，用来计算 threshold
-    """
+def run_aknn_pure_python(img, init_offsets, init_dists, iterations, patch_size, sigma_norm, step=1):
     H, W = img.shape[:2]
-    K = init_offsets.shape[2]
     offsets = init_offsets.copy()
     dists = init_dists.copy()
     search_radius = W
 
-    print(f"Starting AKNN Loop ({iterations} iterations)...")
-
-    # ========== 准备 DCT 矩阵和阈值 ==========
-
-    # 根据 BM3D 论文，2D 预滤波匹配时的硬阈值推荐为 2.5 * sigma 或者更激进一点
-    dct_threshold = 2.5 * sigma_norm
-    # =========================================
+    print(f"Starting AKNN Loop ({iterations} iterations, Step={step})...")
 
     for i in trange(iterations, desc="AKNN Iter"):
         t0 = time.time()
 
-        # 将矩阵和阈值传下去
-        propagation_step(img, offsets, dists, patch_size, i)
+        propagation_step(img, offsets, dists, patch_size, i, step)
 
         current_radius = search_radius * (0.5 ** i)
         if current_radius < 1: current_radius = 1
 
-        random_search_step(img, offsets, dists, patch_size, current_radius)
+        random_search_step(img, offsets, dists, patch_size, current_radius, step)
 
         t1 = time.time()
         tqdm.write(f"Iteration {i + 1} finished in {t1 - t0:.2f}s")
@@ -422,7 +412,7 @@ def bm3d_1st_stage_poisson_gaussian_offsets(img, offsets, patch_size, a, sigma_n
 
 if __name__ == "__main__":
 
-    clean_path = "data/classic_photo/lena_gray_left_up.png"
+    clean_path = "data/classic_photo/lena_gray.png"
     clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
     if clean_path is None:
         print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
@@ -438,27 +428,25 @@ if __name__ == "__main__":
     guide_img = cv2.GaussianBlur(img_noisy, (5, 5), 1.5)
     K = 7  # 我们想找 5 个最近邻
     patch_size = 7 # 补丁大小
+    process_step = 2
 
 
-    offsets, dists = initialize_aknn(guide_img, K, patch_size)
+    offsets, dists = initialize_aknn(guide_img, K, patch_size, step=process_step)
 
-
-    final_offsets, final_dists = run_aknn_pure_python(guide_img, offsets, dists, 2,patch_size,sigma_norm)
-
-    visualize_pixel_and_candidates(
-        img_noisy,
-        32,
-        32,
-        final_offsets,
-        patch_size
+    final_offsets, final_dists = run_aknn_pure_python(
+        guide_img, offsets, dists, 2, patch_size, sigma_norm, step=process_step
     )
-    visualize_pixel_and_candidates(
+    visualize_block_by_index(
         img_noisy,
-        64,
-        64,
-        final_offsets,
-        patch_size
+        block_idx=244,
+        offsets=final_offsets,
+        patch_size=patch_size,
+        step=process_step
     )
+
+    # 你还可以随意试几个别的块，比如第 10 个和第 500 个
+    visualize_block_by_index(img_noisy, 10, final_offsets, patch_size, process_step)
+    visualize_block_by_index(img_noisy, 500, final_offsets, patch_size, process_step)
 
     # img_denoised = bm3d_1st_stage(
     #     noisy_img=img_noisy,
@@ -474,7 +462,7 @@ if __name__ == "__main__":
         patch_size=patch_size,
         a=0.03,
         sigma_norm=sigma_norm,
-        step=1  # <--- 使用步长提速！
+        step=process_step  # 这里与上面的 step=4 保持一致
     )
 
     current_psnr = psnr(img_clean, img_denoised, data_range=1.0)
