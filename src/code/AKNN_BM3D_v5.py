@@ -12,7 +12,61 @@ import time
 from scipy.fft import dctn, idctn  # 引入 3D 变换库
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
+import concurrent.futures
 
+
+def split_image_into_4_blocks(img, overlap=39):
+    """
+    将图像分成上下左右 4 块，包含指定的像素重叠。
+    返回: 4个子图构成的列表，以及它们在原图中的切片坐标。
+    """
+    H, W = img.shape[:2]
+    mid_H, mid_W = H // 2, W // 2
+
+    # 定义四个块的边界 (y_start, y_end, x_start, x_end)
+    coords = [
+        (0, mid_H + overlap, 0, mid_W + overlap),  # Top-Left
+        (0, mid_H + overlap, mid_W - overlap, W),  # Top-Right
+        (mid_H - overlap, H, 0, mid_W + overlap),  # Bottom-Left
+        (mid_H - overlap, H, mid_W - overlap, W)  # Bottom-Right
+    ]
+
+    blocks = []
+    for (y0, y1, x0, x1) in coords:
+        blocks.append(img[y0:y1, x0:x1].copy())
+
+    return blocks, coords
+
+
+
+
+
+def process_single_block(block_idx, noisy_block, guide_block, K, patch_size, process_step, sigma_norm, a):
+    """
+    包装单个块的处理流程，以便投入进程池并行执行。
+    """
+    print(f"\n--- [Worker {block_idx}] 开始处理 ---")
+
+    # 1. 初始化 AKNN
+    offsets, dists = initialize_aknn(guide_block, K, patch_size, step=process_step)
+
+    # 2. 运行 AKNN
+    final_offsets, final_dists = run_aknn_pure_python(
+        guide_block, offsets, dists, 2, patch_size, sigma_norm, step=process_step
+    )
+
+    # 3. 运行 BM3D
+    denoised_block = bm3d_1st_stage_poisson_gaussian_offsets(
+        img=noisy_block,
+        offsets=final_offsets,
+        patch_size=patch_size,
+        a=a,
+        sigma_norm=sigma_norm,
+        step=process_step
+    )
+
+    print(f"--- [Worker {block_idx}] 处理完成 ---")
+    return block_idx, denoised_block
 
 def visualize_block_by_index(img, block_idx, offsets, patch_size, step):
     """
@@ -409,78 +463,102 @@ def bm3d_1st_stage_poisson_gaussian_offsets(img, offsets, patch_size, a, sigma_n
     return np.clip(denoised_img, 0, 1)
 
 
-
 if __name__ == "__main__":
-
-    clean_path = "data/classic_photo/lena_gray_right_down.png"
+    clean_path = "data/classic_photo/lena_gray.png"
     clean_img_cv = cv2.imread(str(clean_path), cv2.IMREAD_GRAYSCALE)
-    if clean_path is None:
+    if clean_img_cv is None:
         print(f"错误：找不到路径为 {clean_path} 的图片，请检查路径。")
+        exit()
+
     img_clean = clean_img_cv.astype(np.float32) / 255.0
 
     sigma_val = 25
     sigma_norm = sigma_val / 255.0
-    np.random.seed(42)  # 固定种子方便复现
-    img_noisy = add_poisson_gaussian_noise(img_clean, a=0.02, sigma_norm=sigma_norm, seed=42)
-    #noise = np.random.normal(0, sigma_norm, img_clean.shape)
-    #img_noisy = np.clip(img_clean + noise, 0, 1)
-
-    guide_img = cv2.GaussianBlur(img_noisy, (5, 5), 1.5)
-    K = 7  # 我们想找 5 个最近邻
-    patch_size = 7 # 补丁大小
+    a_val = 0.02
+    K = 7
+    patch_size = 7
     process_step = 2
+    overlap_pixels = 39  # 设置你想要的重叠像素
 
+    np.random.seed(42)
+    img_noisy = add_poisson_gaussian_noise(img_clean, a=a_val, sigma_norm=sigma_norm, seed=42)
+    guide_img = cv2.GaussianBlur(img_noisy, (5, 5), 1.5)
 
-    offsets, dists = initialize_aknn(guide_img, K, patch_size, step=process_step)
+    # ==========================================
+    # 分治策略 (Divide and Conquer)
+    # ==========================================
 
-    final_offsets, final_dists = run_aknn_pure_python(
-        guide_img, offsets, dists, 2, patch_size, sigma_norm, step=process_step
-    )
-    visualize_block_by_index(
-        img_noisy,
-        block_idx=244,
-        offsets=final_offsets,
-        patch_size=patch_size,
-        step=process_step
-    )
+    # 1. 切分为 4 块
+    noisy_blocks, block_coords = split_image_into_4_blocks(img_noisy, overlap=overlap_pixels)
+    guide_blocks, _ = split_image_into_4_blocks(guide_img, overlap=overlap_pixels)
 
-    # 你还可以随意试几个别的块，比如第 10 个和第 500 个
-    visualize_block_by_index(img_noisy, 10, final_offsets, patch_size, process_step)
-    visualize_block_by_index(img_noisy, 500, final_offsets, patch_size, process_step)
+    denoised_blocks = [None] * 4
 
-    # img_denoised = bm3d_1st_stage(
-    #     noisy_img=img_noisy,
-    #     offsets=final_offsets,
-    #     patch_size=patch_size,
-    #     sigma=sigma_norm,
-    #     step=1  # 步长为 3 提速
-    # )
+    # 2. 并行处理 (使用 4 个进程)
+    print("启动 4 进程并行处理...")
+    t_start_parallel = time.time()
 
-    img_denoised = bm3d_1st_stage_poisson_gaussian_offsets(
-        img=img_noisy,
-        offsets=final_offsets,
-        patch_size=patch_size,
-        a=0.03,
-        sigma_norm=sigma_norm,
-        step=process_step  # 这里与上面的 step=4 保持一致
-    )
+    # ProcessPoolExecutor 可以绕过 Python 的 GIL，实现真正的多核计算
+    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+        # 提交 4 个任务
+        futures = []
+        for i in range(4):
+            future = executor.submit(
+                process_single_block,
+                i, noisy_blocks[i], guide_blocks[i],
+                K, patch_size, process_step, sigma_norm, a_val
+            )
+            futures.append(future)
 
+        # 收集结果
+        for future in concurrent.futures.as_completed(futures):
+            block_idx, result_block = future.result()
+            denoised_blocks[block_idx] = result_block
+
+    print(f"并行处理完成，耗时: {time.time() - t_start_parallel:.2f}s")
+
+    # 3. 图像融合 (Merge)
+    H, W = img_clean.shape
+    numerator = np.zeros((H, W), dtype=np.float32)
+    denominator = np.zeros((H, W), dtype=np.float32)
+
+    for i in range(4):
+        y0, y1, x0, x1 = block_coords[i]
+
+        # 直接把处理好的子图加进去，不需要任何 mask！
+        numerator[y0:y1, x0:x1] += denoised_blocks[i]
+
+        # 这个区域的计数器统一加 1
+        denominator[y0:y1, x0:x1] += 1.0
+
+        # 取平均：
+        # 重叠区域由于被加了多次，denominator 自然会是 2 或 4
+        # 边缘和非重叠区域 denominator 自然是 1
+    img_denoised = numerator / denominator
+    img_denoised = np.clip(img_denoised, 0, 1)
+
+    # ==========================================
+    # 评估与可视化
+    # ==========================================
     current_psnr = psnr(img_clean, img_denoised, data_range=1.0)
     current_ssim = ssim(img_clean, img_denoised, data_range=1.0)
-    print(f"PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
-    # 5. 可视化对比
+    print(f"\nFinal PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
+
     plt.figure(figsize=(15, 5))
-    plt.subplot(1, 3, 1);
-    plt.title("Clean (Ground Truth)");
-    plt.imshow(img_clean, cmap='gray');
+    plt.subplot(1, 3, 1)
+    plt.title("Clean (Ground Truth)")
+    plt.imshow(img_clean, cmap='gray')
     plt.axis('off')
-    plt.subplot(1, 3, 2);
-    plt.title(f"Noisy (Sigma={sigma_val})");
-    plt.imshow(img_noisy, cmap='gray');
+
+    plt.subplot(1, 3, 2)
+    plt.title(f"Noisy (Sigma={sigma_val})")
+    plt.imshow(img_noisy, cmap='gray')
     plt.axis('off')
-    plt.subplot(1, 3, 3);
-    plt.title("BM3D 1st Stage Denoised");
-    plt.imshow(img_denoised, cmap='gray');
+
+    plt.subplot(1, 3, 3)
+    plt.title("Parallel BM3D 1st Stage")
+    plt.imshow(img_denoised, cmap='gray')
     plt.axis('off')
+
     plt.tight_layout()
     plt.show()
