@@ -133,19 +133,46 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
 
     cv2.imwrite(os.path.join(img_save_dir, f"full_process_{idx:02d}.png"), final_canvas)
 
+def forward_gat(z, a, sigma):
+    """
+    广义 Anscombe 变换 (GAT)
+    将泊松-高斯混合噪声转化为近似标准差为 1 的高斯白噪声。
+    """
+    return 2.0 * np.sqrt(np.maximum(z / a + 3.0 / 8.0 + (sigma ** 2) / (a ** 2), 0))
 
-# image_path = f"data/PhotoCD_PCD0992/03.png"
+def inverse_gat(D, a, sigma):
+    """
+    GAT 的渐近逆变换 (Asymptotic Inverse)
+    将去噪后的高斯域信号映射回原始的泊松-高斯域。
+    """
+    return a * ((D / 2.0) ** 2 - 1.0 / 8.0 - (sigma ** 2) / (a ** 2))
+
+
+
+# png_files = sorted([f for f in os.listdir(png_folder) if f.endswith('.png')])
+# if not os.path.exists(out_folder):
+#     os.makedirs(out_folder)
+# prev_y_vst = None  # 模拟硬件里的前一帧缓存
+# time_search_radius = 7  # 硬件时域小窗的半径
+# for frame_idx, filename in enumerate(png_files):
+
+# image_path = f"data/Xiph_org_Video/coastguard_60pixel/coastguard_060.png"
 # y, cb, cr, img_bgr = read_png_to_yuv(image_path)
 # sigma = 25
 # sigma_norm = sigma / 255.0
 # y_noise = add_poisson_gaussian_noise(y, a=0.02, sigma_norm=sigma_norm, seed=42)
 # # BM3D 这里的 z 接受 [0,1] 范围
+#
+#
+# y_noisy_vst = forward_gat(y_noise, a=0.02, sigma=sigma_norm)
 # denoised_y_norm = bm3d.bm3d(
-#     z=y_noise,
-#     sigma_psd=sigma_norm,
+#     z=y_noisy_vst,
+#     sigma_psd=1,
 #     stage_arg=bm3d.BM3DStages.HARD_THRESHOLDING
 # )
-# y_denoised = np.clip(denoised_y_norm, 0, 1)
+# y_denoised = inverse_gat(denoised_y_norm, a=0.02, sigma=sigma_norm)
+# # 最后必须裁剪回 [0, 1] 范围
+# y_denoised = np.clip(y_denoised, 0.0, 1.0)
 # # 调用显示函数
 # # showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, i)
 # # 使用裁剪后的图像计算指标
@@ -157,19 +184,19 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
 # current_ssim = ssim(y, y_denoised, data_range=1.0)
 # print(f"PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}\n")
 
-
-dataset_path = "data/PhotoCD_PCD0992"
-img_save_dir = Path(dataset_path) / "results"
+#
+dataset_path = "data/Xiph_org_Video/coastguard_60pixel"
+img_save_dir = Path(dataset_path) / "res"
 img_save_dir.mkdir(parents=True, exist_ok=True)
 
 # 换一个 CSV 文件名，以免覆盖你之前的并行版本结果
-csv_file_path = Path(dataset_path) / "bm3d_lib_results.csv"
+csv_file_path = Path(dataset_path) / "bm3d_lib_noVst_results.csv"
 
 # 算法参数
 sigma = 25
 sigma_norm = sigma / 255.0
 a_val = 0.02
-
+#
 # 打开 CSV 文件准备写入
 with open(csv_file_path, mode='w', newline='', encoding='utf-8') as csv_file:
     writer = csv.writer(csv_file)
@@ -177,29 +204,28 @@ with open(csv_file_path, mode='w', newline='', encoding='utf-8') as csv_file:
     writer.writerow(['Image_Index', 'Time(s)', 'PSNR(dB)', 'SSIM'])
 
     # 循环遍历 1 到 23
-    for idx in range(1, 24):
+    for idx in range(1, 61):
         print(f"\n{'=' * 20} 开始处理图片 {idx:02d} (官方库) {'=' * 20}")
 
-        image_path = Path(dataset_path) / f"{idx:02d}.png"
+        image_path = Path(dataset_path) / f"coastguard_{idx:03d}.png"
         y, cb, cr, img_bgr = read_png_to_yuv(image_path)
 
         if img_bgr is None:
             print(f"警告：找不到路径为 {image_path} 的图片，跳过此图。")
             continue
 
-        # 加噪
-        y_noise = add_poisson_gaussian_noise(y, a=a_val, sigma_norm=sigma_norm, seed=42)
-
-        # 记录开始时间
         t_start = time.time()
-
-        # BM3D 这里的 z 接受 [0,1] 范围
+        # 加噪
+        y_noise = add_poisson_gaussian_noise(y, a=0.02, sigma_norm=sigma_norm, seed=42)
+        # y_noisy_vst = forward_gat(y_noise, a=0.02, sigma=sigma_norm)
         denoised_y_norm = bm3d.bm3d(
             z=y_noise,
             sigma_psd=sigma_norm,
             stage_arg=bm3d.BM3DStages.HARD_THRESHOLDING
         )
-        y_denoised = np.clip(denoised_y_norm, 0, 1)
+        # y_denoised = inverse_gat(denoised_y_norm, a=0.02, sigma=sigma_norm)
+        # 最后必须裁剪回 [0, 1] 范围
+        y_denoised = np.clip(denoised_y_norm, 0.0, 1.0)
 
         # 记录耗时
         duration = time.time() - t_start
@@ -218,13 +244,10 @@ with open(csv_file_path, mode='w', newline='', encoding='utf-8') as csv_file:
         # showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx)
 
         # 绘制当前降噪图并保存，替代阻塞程序的 plt.show()
-        plt.figure(figsize=(6, 6))
-        plt.imshow(y_denoised, cmap='gray')
-        plt.axis('off')
-        plt.tight_layout()
-
-        plot_save_path = img_save_dir / f"{idx:02d}_lib_denoised.png"
-        plt.savefig(plot_save_path)
-        plt.close()  # 防止内存泄漏
+        denoised_yuv = np.stack([(y_denoised * 255).astype(np.uint8),
+                                 (cr * 255).astype(np.uint8),
+                                 (cb * 255).astype(np.uint8)], axis=2)
+        denoised_bgr = cv2.cvtColor(denoised_yuv, cv2.COLOR_YCrCb2BGR)
+        cv2.imwrite(os.path.join(img_save_dir, f"bm3dlib_noVst_denoised_color_{idx:03d}.png"), denoised_bgr)
 
 print(f"\n所有处理已完成，库函数结果已保存至：{csv_file_path}")

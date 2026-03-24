@@ -214,7 +214,7 @@ def initialize_aknn(img, K, patch_size=7, step=1):
     print(f"Initializing AKNN for image {H}x{W} with K={K}, Step={step}...")
 
     # 【关键修改】：起点设为 r，步长设为 step，与 BM3D 完美对齐
-    for y in tqdm(range(r, H - r, step), desc="Init AKNN"):
+    for y in range(r, H - r, step):
         for x in range(r, W - r, step):
             candidates = []
             for k in range(K):
@@ -310,7 +310,7 @@ def propagation_step(img, offsets, dists, patch_size, iter_num, step=1):
         x_range = range(end_x - step, r - 1, -step)
         neighbor_deltas = [(step, 0), (0, step)] # 看右边和下边 step 距离的邻居
 
-    for y in tqdm(y_range, desc=f"    Prop iter{iter_num + 1}", leave=False):
+    for y in y_range:
         for x in x_range:
             for dy_n, dx_n in neighbor_deltas:
                 nb_y, nb_x = y + dy_n, x + dx_n
@@ -330,7 +330,7 @@ def random_search_step(img, offsets, dists, patch_size, search_radius, step=1):
     print(f"  > Random Search (Radius: {search_radius:.2f}, Step: {step})...")
 
     # 【关键修改】：按 step 遍历网格
-    for y in tqdm(range(r, H - r, step), desc="    Random", leave=False):
+    for y in range(r, H - r, step):
         for x in range(r, W - r, step):
             for k in range(K):
                 best_dy, best_dx = offsets[y, x, k]
@@ -529,14 +529,14 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
         ty = (i // 4) * h + 30
         cv2.putText(final_canvas, text, (tx, ty), font, 0.7, (0, 255, 0), 2)
 
-    cv2.imwrite(os.path.join(img_save_dir, f"AKNN_BM3D_haar_VST__k_7_step_4_{idx:02d}.png"), final_canvas)
+    cv2.imwrite(os.path.join(img_save_dir, f"v6_{idx:03d}.png"), final_canvas)
 
 if __name__ == "__main__":
 
-    # idx = 3
-    # dataset_path = "data/PhotoCD_PCD0992"
-    # clean_path = Path(dataset_path) / f"{idx:02d}.png"
-    # img_save_dir = Path(dataset_path) / "results"
+    # idx =1
+    # dataset_path = "data/Xiph_org_Video/coastguard_5pixel"
+    # clean_path = Path(dataset_path) / f"coastguard_{idx:03d}.png"
+    # img_save_dir = Path(dataset_path) / "res"
     #
     # y, cb, cr, clean_img_cv = read_png_to_yuv(clean_path)
     # if clean_img_cv is None:
@@ -553,60 +553,48 @@ if __name__ == "__main__":
     #
     # np.random.seed(42)
     # y_noisy = add_poisson_gaussian_noise(y, a=a_val, sigma_norm=sigma_norm, seed=42)
-    # guide_img = cv2.GaussianBlur(y_noisy, (5, 5), 1.5)
+    # y_noisy_vst = forward_gat(y_noisy, a=a_val, sigma=sigma_norm)
     #
+    # # Guide image 也要在 VST 域生成
+    # guide_img_vst = cv2.GaussianBlur(y_noisy_vst, (5, 5), 1.5)
     # # ==========================================
     # # 分治策略 (Divide and Conquer)
     # # ==========================================
-    #
     # # 1. 切分为 4 块
-    # noisy_blocks, block_coords = split_image_into_4_blocks(y_noisy, overlap=overlap_pixels)
-    # guide_blocks, _ = split_image_into_4_blocks(guide_img, overlap=overlap_pixels)
-    #
-    # denoised_blocks = [None] * 4
-    #
-    # # 2. 并行处理 (使用 4 个进程)
-    # print("启动 4 进程并行处理...")
+    # noisy_blocks, block_coords = split_image_into_4_blocks(y_noisy_vst, overlap=overlap_pixels)
+    # guide_blocks, _ = split_image_into_4_blocks(guide_img_vst, overlap=overlap_pixels)
+    # denoised_vst_blocks = [None] * 4
     # t_start_parallel = time.time()
-    #
-    # # ProcessPoolExecutor 可以绕过 Python 的 GIL，实现真正的多核计算
     # with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
-    #     # 提交 4 个任务
     #     futures = []
     #     for i in range(4):
+    #         # 注意参数变少了，不再需要传 a_val 和 sigma_norm 给 BM3D
     #         future = executor.submit(
     #             process_single_block,
     #             i, noisy_blocks[i], guide_blocks[i],
-    #             K, patch_size, process_step, sigma_norm, a_val
+    #             K, patch_size, process_step
     #         )
     #         futures.append(future)
-    #
-    #     # 收集结果
     #     for future in concurrent.futures.as_completed(futures):
     #         block_idx, result_block = future.result()
-    #         denoised_blocks[block_idx] = result_block
-    #
-    # print(f"并行处理完成，耗时: {time.time() - t_start_parallel:.2f}s")
-    #
-    # # 3. 图像融合 (Merge)
+    #         denoised_vst_blocks[block_idx] = result_block
+    # duration = time.time() - t_start_parallel
+    # print(f"并行处理完成，耗时: {duration:.2f}s")
+    # # 3. 图像融合 (VST域的 Merge)
     # H, W = y.shape
     # numerator = np.zeros((H, W), dtype=np.float32)
     # denominator = np.zeros((H, W), dtype=np.float32)
-    #
     # for i in range(4):
     #     y0, y1, x0, x1 = block_coords[i]
-    #
-    #     # 直接把处理好的子图加进去，不需要任何 mask！
-    #     numerator[y0:y1, x0:x1] += denoised_blocks[i]
-    #
-    #     # 这个区域的计数器统一加 1
+    #     numerator[y0:y1, x0:x1] += denoised_vst_blocks[i]
     #     denominator[y0:y1, x0:x1] += 1.0
-    #
-    #     # 取平均：
-    #     # 重叠区域由于被加了多次，denominator 自然会是 2 或 4
-    #     # 边缘和非重叠区域 denominator 自然是 1
-    # y_denoised = numerator / denominator
-    # y_denoised = np.clip(y_denoised, 0, 1)
+    # y_denoised_vst = numerator / denominator
+    # # ==========================================
+    # # 【新增】4. 逆 VST 变换
+    # # ==========================================
+    # y_denoised = inverse_gat(y_denoised_vst, a=a_val, sigma=sigma_norm)
+    # # 最后必须裁剪回 [0, 1] 范围
+    # y_denoised = np.clip(y_denoised, 0.0, 1.0)
     #
     # # ==========================================
     # # 评估与可视化
@@ -649,12 +637,12 @@ if __name__ == "__main__":
     # 假设这里已经导入了你自定义的函数
     # from your_module import read_png_to_yuv, add_poisson_gaussian_noise, split_image_into_4_blocks, process_single_block, showPic, psnr, ssim
 
-    dataset_path = "data/PhotoCD_PCD0992"
-    img_save_dir = Path(dataset_path) / "results"
+    dataset_path = "data/Xiph_org_Video/coastguard_60pixel"
+    img_save_dir = Path(dataset_path) / "res"
     img_save_dir.mkdir(parents=True, exist_ok=True)
 
     # CSV 保存路径
-    csv_file_path = Path(dataset_path) / "AKNN_bm3d_haar_VST_results_k_7_step_4.csv"
+    csv_file_path = Path(dataset_path) / "AKNN_bm3d_div_NOTIME_esults_k_7_step_2.csv"
 
     # 算法参数
     sigma_val = 25
@@ -662,7 +650,7 @@ if __name__ == "__main__":
     a_val = 0.02
     K = 7
     patch_size = 7
-    process_step = 4
+    process_step = 2
     overlap_pixels = 39
 
     # 打开 CSV 文件准备写入
@@ -672,10 +660,10 @@ if __name__ == "__main__":
         writer.writerow(['Image_Index', 'Time(s)', 'PSNR(dB)', 'SSIM'])
 
         # 循环遍历 1 到 23
-        for idx in range(1, 24):
+        for idx in range(1, 61):
             print(f"\n{'=' * 20} 开始处理图片 {idx:02d} {'=' * 20}")
 
-            clean_path = Path(dataset_path) / f"{idx:02d}.png"
+            clean_path = Path(dataset_path) / f"coastguard_{idx:03d}.png"
             y, cb, cr, clean_img_cv = read_png_to_yuv(clean_path)
 
             if clean_img_cv is None:
@@ -755,27 +743,27 @@ if __name__ == "__main__":
             csv_file.flush()
 
             # 保存中间结果和对比图
-            showPic(clean_img_cv, y, y_noisy, cb, cr, y_denoised, img_save_dir, idx)
+            # showPic(clean_img_cv, y, y_noisy, cb, cr, y_denoised, img_save_dir, idx)
 
-            plt.figure(figsize=(15, 5))
-            plt.subplot(1, 3, 1)
-            plt.title("Clean (Ground Truth)")
-            plt.imshow(y, cmap='gray')
-            plt.axis('off')
-
-            plt.subplot(1, 3, 2)
-            plt.title(f"Noisy (Sigma={sigma_val})")
-            plt.imshow(y_noisy, cmap='gray')
-            plt.axis('off')
-
-            plt.subplot(1, 3, 3)
-            plt.title("Parallel BM3D 1st Stage")
-            plt.imshow(y_denoised, cmap='gray')
-            plt.axis('off')
-
-            plt.tight_layout()
-            plot_save_path = img_save_dir / f"{idx:02d}_plot.png"
-            plt.savefig(plot_save_path)
-            plt.close()
+            # plt.figure(figsize=(15, 5))
+            # plt.subplot(1, 3, 1)
+            # plt.title("Clean (Ground Truth)")
+            # plt.imshow(y, cmap='gray')
+            # plt.axis('off')
+            #
+            # plt.subplot(1, 3, 2)
+            # plt.title(f"Noisy (Sigma={sigma_val})")
+            # plt.imshow(y_noisy, cmap='gray')
+            # plt.axis('off')
+            #
+            # plt.subplot(1, 3, 3)
+            # plt.title("Parallel BM3D 1st Stage")
+            # plt.imshow(y_denoised, cmap='gray')
+            # plt.axis('off')
+            #
+            # plt.tight_layout()
+            # plot_save_path = img_save_dir / f"{idx:02d}_plot.png"
+            # plt.savefig(plot_save_path)
+            # plt.close()
 
     print(f"\n所有处理已完成，结果已保存至：{csv_file_path}")

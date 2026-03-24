@@ -5,8 +5,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 import time
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity as ssim
 from scipy.fft import dctn, idctn
 import pywt
+import sys
+import csv
 
 
 def forward_gat(z, a, sigma):
@@ -204,7 +208,7 @@ def initialize_aknn(img, K, patch_size=7, step=1):
     print(f"Initializing AKNN for image {H}x{W} with K={K}, Step={step}...")
 
     # 【关键修改】：起点设为 r，步长设为 step，与 BM3D 完美对齐
-    for y in tqdm(range(r, H - r, step), desc="Init AKNN"):
+    for y in tqdm(range(r, H - r, step), desc="Init AKNN", dynamic_ncols=True):
         for x in range(r, W - r, step):
             candidates = []
             for k in range(K):
@@ -300,7 +304,7 @@ def propagation_step(img, offsets, dists, patch_size, iter_num, step=1):
         x_range = range(end_x - step, r - 1, -step)
         neighbor_deltas = [(step, 0), (0, step)] # 看右边和下边 step 距离的邻居
 
-    for y in tqdm(y_range, desc=f"    Prop iter{iter_num + 1}", leave=False):
+    for y in y_range:
         for x in x_range:
             for dy_n, dx_n in neighbor_deltas:
                 nb_y, nb_x = y + dy_n, x + dx_n
@@ -320,7 +324,7 @@ def random_search_step(img, offsets, dists, patch_size, search_radius, step=1):
     print(f"  > Random Search (Radius: {search_radius:.2f}, Step: {step})...")
 
     # 【关键修改】：按 step 遍历网格
-    for y in tqdm(range(r, H - r, step), desc="    Random", leave=False):
+    for y in range(r, H - r, step):
         for x in range(r, W - r, step):
             for k in range(K):
                 best_dy, best_dx = offsets[y, x, k]
@@ -343,18 +347,39 @@ def run_aknn_pure_python(img, init_offsets, init_dists, iterations, patch_size, 
 
     print(f"Starting AKNN Loop ({iterations} iterations, Step={step})...")
 
-    for i in trange(iterations, desc="AKNN Iter"):
+    pbar = tqdm(
+        range(iterations),
+        desc="AKNN Iter",
+        dynamic_ncols=True,
+        file=sys.stdout,
+        mininterval=0.1,
+        position=0
+    )
+
+    for i in pbar:
         t0 = time.time()
 
+        # --- propagation ---
         propagation_step(img, offsets, dists, patch_size, i, step)
 
+        # --- radius decay ---
         current_radius = search_radius * (0.5 ** i)
-        if current_radius < 1: current_radius = 1
+        if current_radius < 1:
+            current_radius = 1
 
+        # --- random search ---
         random_search_step(img, offsets, dists, patch_size, current_radius, step)
 
         t1 = time.time()
-        tqdm.write(f"Iteration {i + 1} finished in {t1 - t0:.2f}s")
+        iter_time = t1 - t0
+
+        # ⭐ 核心改进：用 set_postfix 替代 tqdm.write
+        pbar.set_postfix({
+            "iter_time": f"{iter_time:.2f}s",
+            "radius": int(current_radius),
+            "step": step,
+            "patch": patch_size
+        })
 
     return offsets, dists
 
@@ -519,41 +544,35 @@ def showPic(img_bgr, y, y_noise, cb, cr, y_denoised, img_save_dir, idx):
         ty = (i // 4) * h + 30
         cv2.putText(final_canvas, text, (tx, ty), font, 0.7, (0, 255, 0), 2)
 
-    cv2.imwrite(os.path.join(img_save_dir, f"AKNN_BM3D_haar_VST__k_7_step_4_{idx:02d}.png"), final_canvas)
+    cv2.imwrite(os.path.join(img_save_dir, f"noisy_color_{idx:03d}.png"), noisy_bgr)
+    cv2.imwrite(os.path.join(img_save_dir, f"kaiser_denoised_color_{idx:03d}.png"), denoised_bgr)
+    cv2.imwrite(os.path.join(img_save_dir, f"AKNN_VBM3D_kaiser_step_2_{idx:03d}_ALL.png"), final_canvas)
 
 
-def temporal_local_search(curr_guide, prev_guide, y, x, patch_size, K_time=3, time_search_radius=7):
-    """
-    模拟硬件时域滑窗搜索：在前一帧局部窗口内暴力寻找相似块。
-    """
-    H, W = curr_guide.shape[:2]
+def temporal_local_search(curr_img, prev_img, y, x, patch_size, K_time_max, search_radius):
+    H, W = curr_img.shape[:2]
     r = patch_size // 2
     candidates = []
 
-    # 锁定前一帧的局部搜索窗边界
-    min_dy = max(-time_search_radius, r - y)
-    max_dy = min(time_search_radius, H - r - 1 - y)
-    min_dx = max(-time_search_radius, r - x)
-    max_dx = min(time_search_radius, W - r - 1 - x)
+    min_dy = max(-search_radius, r - y)
+    max_dy = min(search_radius, H - r - 1 - y)
+    min_dx = max(-search_radius, r - x)
+    max_dx = min(search_radius, W - r - 1 - x)
 
-    # 提取当前帧的参考块
-    patch_curr = curr_guide[y - r:y + r + 1, x - r:x + r + 1]
+    patch_curr = curr_img[y - r: y + r + 1, x - r: x + r + 1]
 
-    # 在前一帧的小窗内暴力遍历 (硬件中这是一个高度并行的 PE 阵列)
     for dy in range(min_dy, max_dy + 1):
         for dx in range(min_dx, max_dx + 1):
             ny, nx = y + dy, x + dx
-            patch_prev = prev_guide[ny - r:ny + r + 1, nx - r:nx + r + 1]
+            patch_prev = prev_img[ny - r: ny + r + 1, nx - r: nx + r + 1]
 
             diff = patch_curr - patch_prev
             dist = np.sum(diff * diff)
             candidates.append((dist, dy, dx))
 
-    # 按距离排序，取前 K_time 个最优的时域候选
+    # 按距离排序，纯粹按实力说话
     candidates.sort(key=lambda item: item[0])
-    best_time_candidates = candidates[:K_time]
-
-    return best_time_candidates
+    return candidates[:K_time_max]
 
 
 def bm3d_1st_stage_video(img_vst_list, offsets_3d, patch_size, step=3):
@@ -575,10 +594,13 @@ def bm3d_1st_stage_video(img_vst_list, offsets_3d, patch_size, step=3):
     lambda_3d = 2.7 * sigma_vst
     sigma_vst2 = sigma_vst ** 2
 
+    kaiser_1d = np.kaiser(patch_size, 2.0)
+    kaiser_2d = np.outer(kaiser_1d, kaiser_1d)
+
     for y in trange(r, H - r, step, desc="BM3D Video Transform"):
         for x in range(r, W - r, step):
             # 记录有效的坐标信息: (t, y, x)
-            coords_3d = [(0, y, x)]  # 必定包含当前帧自身的中心块
+            coords_3d = []  # 必定包含当前帧自身的中心块
 
             for k in range(K_total):
                 t, dy, dx = offsets_3d[y, x, k]
@@ -613,11 +635,12 @@ def bm3d_1st_stage_video(img_vst_list, offsets_3d, patch_size, step=3):
             group_1d_inv = group_1d_inv[:K_actual, :, :]
             group_3d_denoised = idctn(group_1d_inv, axes=(1, 2), norm='ortho')
 
-            # --- 聚合：只聚合当前帧 (t==0) 的像素，前一帧只做降噪参考，不回写 ---
+            # ================== 【核心修复：在聚合时乘上 kaiser_2d】 ==================
             for i, (ct, cy, cx) in enumerate(coords_3d):
                 if ct == 0:
-                    numerator[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size] += group_3d_denoised[i] * weight
-                    denominator[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size] += weight
+                    numerator[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size] += group_3d_denoised[
+                                                                                               i] * weight * kaiser_2d
+                    denominator[cy - r: cy - r + patch_size, cx - r: cx - r + patch_size] += weight * kaiser_2d
 
     mask = denominator > 0
     denoised_img = curr_img_vst.copy()
@@ -632,6 +655,16 @@ def process_video_sequence(png_folder, out_folder, K_spatial=7, K_time=3, patch_
     if not os.path.exists(out_folder):
         os.makedirs(out_folder)
 
+    csv_file_path = os.path.join(out_folder, f"AKNN_VBM3D_metrics_K{K_spatial}_{K_time}.csv")
+
+    # 打开文件 (使用 with 语句可以确保后续不出错，但在大循环里我们需要手动控制，这里用普通 open)
+    csv_file = open(csv_file_path, mode='w', newline='', encoding='utf-8')
+    csv_writer = csv.writer(csv_file)
+    # 写入表头
+    csv_writer.writerow(['Frame_Index', 'Filename', 'PSNR(dB)', 'SSIM'])
+    print(f"Metrics will be saved to: {csv_file_path}")
+
+
     prev_y_vst = None  # 模拟硬件里的前一帧缓存
     time_search_radius = 7  # 硬件时域小窗的半径
 
@@ -643,56 +676,121 @@ def process_video_sequence(png_folder, out_folder, K_spatial=7, K_time=3, patch_
         y, cb, cr, img_bgr = read_png_to_yuv(img_path)
 
         # [可选] 添加人工噪声用于测试
-        y_noisy = add_poisson_gaussian_noise(y, a=0.01, sigma_norm=5 / 255)
+        y_noisy = add_poisson_gaussian_noise(y, a=0.02, sigma_norm=25 / 255)
 
         # 2. VST 变换
         # 注意：由于是普通 PNG，参数 a 和 sigma 需设为经验固定值
-        curr_y_vst = forward_gat(y_noisy, a=0.01, sigma=5 / 255)
+        curr_y_vst = forward_gat(y_noisy, a=0.02, sigma=25 / 255)
         H, W = curr_y_vst.shape
 
+        curr_guide_vst = cv2.GaussianBlur(curr_y_vst, (5, 5), 1.5)
+
+
         # 3. 空域 AKNN (只在当前帧跑)
-        offsets_spatial, dists_spatial = initialize_aknn(curr_y_vst, K_spatial, patch_size, step)
-        offsets_spatial, _ = run_aknn_pure_python(
-            curr_y_vst, offsets_spatial, dists_spatial, iterations=2,
+        offsets_spatial, dists_spatial = initialize_aknn(curr_guide_vst, K_spatial, patch_size, step)
+        offsets_spatial, dists_spatial = run_aknn_pure_python(
+            curr_guide_vst, offsets_spatial, dists_spatial, iterations=2,
             patch_size=patch_size, sigma_norm=1.0, step=step
         )
 
-        # 4. 时空联合矩阵初始化 (维度为 H, W, K_total, 3)
-        K_total = K_spatial + K_time
-        offsets_3d = np.full((H, W, K_total, 3), -1, dtype=int)
+        # 设定硬件 3D 变换的绝对深度
+        K_target_power_of_2 = 8
+        K_time_max = 3  # 时域选 4 个参战
+        K_spatial = 7  # 空域选 7 个参战
 
-        # 5. 合并空域和时域的 offsets
+        offsets_3d = np.full((H, W, K_target_power_of_2, 3), -1, dtype=int)
+
+        # 硬件监控寄存器
+        temporal_usage_stats = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0}
+        total_3d_groups = 0
+
         for cy in range(patch_size // 2, H - patch_size // 2, step):
             for cx in range(patch_size // 2, W - patch_size // 2, step):
-                # 塞入空域结果 (t=0)
-                for k in range(K_spatial):
-                    offsets_3d[cy, cx, k] = [0, offsets_spatial[cy, cx, k, 0], offsets_spatial[cy, cx, k, 1]]
 
-                # 如果存在前一帧，进行时域暴力搜索 (t=1)
+                # 1. 雷打不动：参考块自己 (必定在第0位)
+                offsets_3d[cy, cx, 0] = [0, 0, 0]
+
+                # ====== 时空竞争池 (Pool) ======
+                candidate_pool = []
+
+                #2. 时域选手进池子 (带着它们的真实距离)
                 if prev_y_vst is not None:
                     time_cands = temporal_local_search(
-                        curr_y_vst, prev_y_vst, cy, cx, patch_size, K_time, time_search_radius
+                        curr_guide_vst, prev_y_vst, cy, cx, patch_size, K_time_max, search_radius=4
                     )
-                    for kt, (_, dy, dx) in enumerate(time_cands):
-                        offsets_3d[cy, cx, K_spatial + kt] = [1, dy, dx]
+                    for dist, dy, dx in time_cands:
+                        candidate_pool.append((dist, 1, dy, dx))  # t=1 代表时域
+
+                # 3. 空域选手进池子 (带着它们的真实距离)
+                for k_s in range(offsets_spatial.shape[2]):
+                    dy, dx = offsets_spatial[cy, cx, k_s, 0], offsets_spatial[cy, cx, k_s, 1]
+                    dist = dists_spatial[cy, cx, k_s]  # 直接从 AKNN 结果里取距离
+
+                    if not (dy == 0 and dx == 0):  # 排除掉自己
+                        candidate_pool.append((dist, 0, dy, dx))  # t=0 代表空域
+
+                # 4. 全局大排序！只取前 7 名
+                candidate_pool.sort(key=lambda item: item[0])
+                best_7 = candidate_pool[:7]
+
+                # 5. 把胜利者装入流水线
+                valid_count = 1  # 已经有参考块了
+                time_used = 0
+
+                for dist, t, dy, dx in best_7:
+                    offsets_3d[cy, cx, valid_count] = [t, dy, dx]
+                    valid_count += 1
+                    if t == 1:
+                        time_used += 1
+
+                # 6. 兜底 (理论上只要池子大于7就不会触发)
+                while valid_count < K_target_power_of_2:
+                    offsets_3d[cy, cx, valid_count] = [0, 0, 0]
+                    valid_count += 1
+
+                # 统计
+                if time_used in temporal_usage_stats:
+                    temporal_usage_stats[time_used] += 1
+                total_3d_groups += 1
+
+        # ====== 打印统计信息 ======
+        if prev_y_vst is not None:
+            print("\n  [硬件监控] 时空竞争结果 (最高时域占比分析):")
+            for k in range(8):  # 最多可能7个都是时域的（如果你池子全放开的话，当前限制了4个）
+                if k > K_time_max: break
+                count = temporal_usage_stats[k]
+                pct = (count / total_3d_groups) * 100
+                bar = "█" * int(pct / 5)
+                print(f"    包含 {k} 个时域块的组数: {count:5d} ({pct:5.1f}%) | {bar}")
+            avg_temp = sum(k * v for k, v in temporal_usage_stats.items()) / total_3d_groups
+            print(f"    平均每组使用时域块数: {avg_temp:.2f} / 8\n")
+        # ====================================
 
         # 6. 传入跨帧 BM3D 引擎
         img_vst_list = [curr_y_vst, prev_y_vst] if prev_y_vst is not None else [curr_y_vst]
         denoised_y_vst = bm3d_1st_stage_video(img_vst_list, offsets_3d, patch_size, step)
 
         # 7. 逆 VST 变换
-        denoised_y = inverse_gat(denoised_y_vst, a=0.01, sigma=5 / 255)
+        denoised_y = inverse_gat(denoised_y_vst, a=0.02, sigma=25 / 255)
         denoised_y = np.clip(denoised_y, 0.0, 1.0)
-
+        current_psnr = psnr(y, denoised_y, data_range=1.0)
+        current_ssim = ssim(y, denoised_y, data_range=1.0)
+        print(f"Final PSNR: {current_psnr:.2f} dB | SSIM: {current_ssim:.4f}")
+        csv_writer.writerow([frame_idx, filename, round(current_psnr, 4), round(current_ssim, 4)])
+        csv_file.flush()  # 极其重要：写完立刻刷入硬盘，防止程序崩溃丢数据
         # 可视化保存
         showPic(img_bgr, y, y_noisy, cb, cr, denoised_y, out_folder, frame_idx)
 
         # 8. 更新前一帧缓存 (硬件流水线数据滚动)
-        prev_y_vst = denoised_y_vst.copy()  # 可以拿去噪后的图做下一帧参考，也可以拿原始 VST 图
+        prev_y_vst = None  # 可以拿去噪后的图做下一帧参考，也可以拿原始 VST 图
 
+    csv_file.close()
+    print(f"\nAll frames processed. Metrics saved successfully to {csv_file_path}")
 
 
 if __name__ == "__main__":
-    png_folder = "data/Xiph_org_Video/coastguard_5pixel"  # 替换为你的输入文件夹路径
-    out_folder = "data/Xiph_org_Video/coastguard_5pixel/res"  # 替换为你的输出文件夹路径
-    process_video_sequence(png_folder, out_folder, K_spatial=7, K_time=3, patch_size=6, step=2)
+    png_folder = "data/Xiph_org_Video/coastguard_60pixel"  # 替换为你的输入文件夹路径
+    out_folder = "data/Xiph_org_Video/coastguard_60pixel/res"  # 替换为你的输出文件夹路径
+    # png_folder = "data/DAVIS/car-turn"  # 替换为你的输入文件夹路径
+    # out_folder = "data/DAVIS/car-turn/res"  # 替换为你的输出文件夹路径
+    process_video_sequence(png_folder, out_folder, K_spatial=7, K_time=3, patch_size=7, step=2)
