@@ -4,7 +4,8 @@
 /.stfolder
 /.venv
 /data
-/out/images
+/out
+/毕设项目
 
 
 /.stignore

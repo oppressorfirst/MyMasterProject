@@ -20,7 +20,7 @@ img_save_dir = Path(dataset_path) / "results_grid_search"
 img_save_dir.mkdir(parents=True, exist_ok=True)
 
 # CSV 保存路径
-csv_file_path = Path(dataset_path) / "AKNN_grid_search_results.csv"
+csv_file_path = Path(dataset_path) / "AKNN_grid_search_results_small.csv"
 
 # ==========================================
 # 【改动 1】定义需要搜索的参数列表
@@ -41,7 +41,7 @@ total_combinations = len(param_combinations)
 # 【强烈建议】为了防止网格搜索生成几万张图片撑爆硬盘，默认关闭画图。只记录指标到 CSV。
 SAVE_IMAGES = False
 # 【强烈建议】测试时可以先将范围缩小，例如 range(1, 4) 只测前三张图
-TEST_IMAGE_RANGE = range(1, 24)
+TEST_IMAGE_RANGE = range(1, 6)
 
 print(f"总计需要测试的参数组合数: {total_combinations} 种。")
 print("正在将测试图片预加载至内存...")
@@ -57,7 +57,7 @@ print(f"预加载完成，共计 {len(image_cache)} 张图片。")
 # 极致优化 2：在最外层创建一个长存活期的进程池
 # ==========================================
 with open(csv_file_path, mode='w', newline='', encoding='utf-8') as csv_file, \
-        concurrent.futures.ProcessPoolExecutor(max_workers=4) as global_executor:
+        concurrent.futures.ProcessPoolExecutor(max_workers=16) as global_executor:
     writer = csv.writer(csv_file)
     writer.writerow([
         'Sigma', 'a_val', 'K', 'Patch_Size', 'Step', 'Overlap',
