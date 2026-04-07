@@ -140,7 +140,7 @@ def compute_patch_distance(img, y, x, ny, nx, patch_size):
     diff = patch_src - patch_target
     return np.sum(diff * diff)
 
-def initialize_aknn(img, K, patch_size=7, step=1):
+def initialize_aknn(img, K, patch_size=7, step=2):
     H, W = img.shape[:2]
     r = patch_size // 2
     sigma_s = min(H, W) / 4.0
@@ -551,15 +551,35 @@ def process_raw_sequence(mat_folder, out_folder,
             futures = []
             for i in range(len(curr_noisy_blocks)):
                 # 【核心修改】：只切片抽出 Gr 通道喂给 Worker！
-                curr_guide_gr_only = curr_guide_blocks[i][..., gr_index]
-                prev_guide_gr_only = prev_guide_blocks[i][..., gr_index] if prev_guide_blocks[i] is not None else None
+                # curr_guide_gr_only = curr_guide_blocks[i][..., gr_index]
+                # prev_guide_gr_only = prev_guide_blocks[i][..., gr_index] if prev_guide_blocks[i] is not None else None
                 
+                curr_guide_luma = np.mean(curr_guide_blocks[i], axis=-1)
+                
+                if prev_guide_blocks[i] is not None:
+                    prev_guide_luma = np.mean(prev_guide_blocks[i], axis=-1)
+                else:
+                    prev_guide_luma = None
+
+                # future = executor.submit(
+                #     process_single_block_video_tile_raw,
+                #     i, curr_noisy_blocks[i], curr_guide_gr_only,
+                #     prev_noisy_blocks[i], prev_guide_gr_only,
+                #     K_spatial, K_time, patch_size, step
+                # )
                 future = executor.submit(
                     process_single_block_video_tile_raw,
-                    i, curr_noisy_blocks[i], curr_guide_gr_only,
-                    prev_noisy_blocks[i], prev_guide_gr_only,
-                    K_spatial, K_time, patch_size, step
+                    i, 
+                    curr_noisy_blocks[i], 
+                    curr_guide_luma,        # 传入融合后的引导层
+                    prev_noisy_blocks[i], 
+                    prev_guide_luma,       # 传入融合后的引导层（时域）
+                    K_spatial, 
+                    K_time, 
+                    patch_size, 
+                    step
                 )
+
                 futures.append(future)
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing Tiles"):

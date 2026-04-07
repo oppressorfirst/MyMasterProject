@@ -151,8 +151,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="CRVD RAW TIFF → sRGB PNG 转换工具")
-    parser.add_argument("--input",      default="./data/CRVD",       help="输入目录（原始 RAW 或降噪后 RAW）")
-    parser.add_argument("--output",     default="./data/CRVD_srgb",  help="输出目录")
+    parser.add_argument("--input",      default="./out/results/CRVD",       help="输入目录（原始 RAW 或降噪后 RAW）")
+    parser.add_argument("--output",     default="./out/results/CRVD_srgb",  help="输出目录")
     parser.add_argument("--denoised",   action="store_true",          help="输入是降噪后的 RAW（加此参数仅影响日志标记，ISP 流程相同）")
     args = parser.parse_args()
 

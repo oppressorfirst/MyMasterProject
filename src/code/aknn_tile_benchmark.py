@@ -21,6 +21,8 @@ import concurrent.futures
 import cv2
 import numpy as np
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from src.code.AKNN_BM3D_v8_raw import (
     CRVD_BLACK, CRVD_WHITE, CRVD_RANGE, CRVD_GR_INDEX,
     load_crvd_noise_params,
@@ -140,8 +142,8 @@ def process_frame(noisy_path: str, clean_path: str,
 # ── 主程序 ─────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    NOISY = 'data/CRVD/noisy/scene1/ISO3200/frame1_noisy0.tiff'
-    CLEAN = 'data/CRVD/noisy/scene1/ISO3200/frame1_clean.tiff'
+    NOISY = 'data/CRVD/noisy/scene1/ISO3200/frame1_noisy0_720p.tiff'
+    CLEAN = 'data/CRVD/noisy/scene1/ISO3200/frame1_clean_720p.tiff'
 
     params = load_crvd_noise_params('out/results/crvd_noise_params.csv')
     a_gat, sigma_gat = params[('scene1', 3200, 1)]
@@ -151,9 +153,12 @@ if __name__ == '__main__':
     configs = [
         ('64×64',    64,   64),
         ('128×72',  128,   72),
+        ('72x128',  72,   128),
         ('128×128', 128,  128),   # 当前
         ('256×256', 256,  256),
         ('512×512', 512,  512),
+        ('256x144', 256,  144), 
+        ('144x256', 144,  256),   # 非正方形
     ]
 
     print(f"固定 halo = {FIXED_OVERLAP_PACKED} packed（{FIXED_OVERLAP_PACKED*2} RAW）\n")

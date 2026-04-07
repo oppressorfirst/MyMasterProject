@@ -1,10 +1,9 @@
 """
-CRVD 数据集批量 BM3D 降噪（泊松-高斯自适应）- 单图内层 40 核并行版
-  - 噪声参数从 out/results/crvd_noise_params.csv 读取（per-scene/iso/frame）
-  - 外层循环逐图顺序处理，内层 ProcessPoolExecutor(40 核) 并行执行块匹配
-  - 向量化块匹配结合 Chunking 分发，降低 IPC 序列化开销
+CRVD 数据集批量 BM3D 降噪（包含 VST 变换版本）- 单图内层 40 核并行版
+  - 噪声参数从 out/results/crvd_noise_params.csv 读取
+  - 核心流程：前向 VST -> 纯高斯域 BM3D (固定阈值) -> 后向逆 VST
   - 输出：denoised TIFF + PSNR CSV
-      → out/results/CRVD/my_brute_bm3d_8c/<scene>/<ISO>/
+      → out/results/CRVD/my_brute_bm3d_8c_vst/<scene>/<ISO>/
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from scipy.fft import dctn, idctn
 from skimage.metrics import peak_signal_noise_ratio as skpsnr
 from tqdm import tqdm
 
-# ── 相机参数（与 crvd_raw2png.py 一致）──────────────────────────────────────
+# ── 相机参数 ──────────────────────────────────────────────────────────────────
 BLACK = 240.0
 WHITE = 4095.0
 RANGE = WHITE - BLACK   # 3855.0
@@ -38,22 +37,33 @@ WIN    = 39
 STRIDE = PATCH // 2   # 4
 
 
+# ── VST (广义 Anscombe 变换) 相关函数 ─────────────────────────────────────────
+
+def forward_vst(x: np.ndarray, a: float, b: float) -> np.ndarray:
+    """
+    前向广义 Anscombe 变换 (Generalized Anscombe Transform)
+    将 Poisson-Gaussian 噪声 (Var = a*x + b) 转换为标准差近似为 1 的高斯白噪声。
+    公式: f(x) = 2 * sqrt( max(0, x/a + 3/8 + b/a^2) )
+    """
+    c = 0.375 + b / (a ** 2)
+    val = np.maximum(0.0, x / a + c)
+    return 2.0 * np.sqrt(val)
+
+def inverse_vst_algebraic(f: np.ndarray, a: float, b: float) -> np.ndarray:
+    """
+    代数逆变换 (Algebraic Inverse)
+    公式: I(f) = a * (f^2 / 4 - 3/8 - b/a^2)
+    说明: 此版本为代数闭合解，不涉及复杂的除法和浮点次幂，非常适合 ASIC 的 RTL 实现。
+    """
+    c = 0.375 + b / (a ** 2)
+    return a * ( (f ** 2) / 4.0 - c )
+
+
 # ── 从 CSV 加载噪声参数 ────────────────────────────────────────────────────────
 
 def load_noise_params(
     csv_path: str,
 ) -> dict[tuple[str, int, int], tuple[float, float]]:
-    """
-    读取 crvd_noise_params.csv，返回
-        (scene, iso, frame) -> (a_norm, sigma_norm)
-
-    RAW 域模型:   Var_raw = a_raw*(x_raw - BLACK) + b_raw
-    归一化转换:    a_norm    = a_raw / RANGE
-                  sigma_norm = b_raw / RANGE²   （高斯方差分量）
-
-    同一 (scene, iso, frame) 对应多条 noisy_idx 行，但 a/b 值相同，
-    只取第一次出现的值。
-    """
     params: dict[tuple[str, int, int], tuple[float, float]] = {}
     with open(csv_path, newline='') as f:
         for row in csv.DictReader(f):
@@ -65,7 +75,7 @@ def load_noise_params(
     return params
 
 
-# ── 独立的工作进程函数（必须定义在顶层以支持 Pickle 序列化）─────────────────────
+# ── 独立的工作进程函数 ─────────────────────────────────────────────────────────
 
 def _match_chunk(
     coords_chunk: list[tuple[int, int]],
@@ -74,9 +84,6 @@ def _match_chunk(
     patch_size: int,
     top_k: int,
 ) -> list[dict]:
-    """
-    工作进程函数：处理分配到的一批参考块坐标，执行向量化滑动窗口匹配。
-    """
     H, W = guide.shape
     chunk_results: list[dict] = []
 
@@ -92,7 +99,6 @@ def _match_chunk(
 
         dists = np.mean((patches - ref) ** 2, axis=(-2, -1))
 
-        # 排除自身
         sy = ry - y0;  sx = rx - x0
         if 0 <= sy < ny and 0 <= sx < nx:
             dists[sy, sx] = np.inf
@@ -128,9 +134,6 @@ def _match_chunk(
 
 def vectorized_match_parallel(guide: np.ndarray,
                               num_workers: int = NUM_WORKERS) -> list[dict]:
-    """
-    将参考块坐标切分为 num_workers 个 chunk，分发给进程池并行执行块匹配。
-    """
     H, W = guide.shape
     rad = WIN // 2
 
@@ -155,55 +158,52 @@ def vectorized_match_parallel(guide: np.ndarray,
     return all_results
 
 
-# ── BM3D 自适应硬阈值协同滤波 ─────────────────────────────────────────────────
+# ── BM3D 纯高斯白噪声协同滤波 (AWGN 模式) ─────────────────────────────────────
 
-def bm3d_poisson_gaussian(img: np.ndarray, all_results: list[dict],
-                          a: float, sigma_norm: float) -> np.ndarray:
+def bm3d_awgn_filtering(img_vst: np.ndarray, all_results: list[dict]) -> np.ndarray:
     """
-    泊松-高斯自适应 BM3D 第一阶段（硬阈值）。
-        Var_local = a * mean_local + sigma_norm
-        lambda    = 2.7 * sqrt(Var_local)
+    因为 VST 变换已经将噪声统一为 sigma=1.0 的白噪声，
+    此处的滤波不再需要计算局部均值和方差，直接使用固定阈值。
     """
-    H, W = img.shape
+    H, W = img_vst.shape
     num = np.zeros((H, W), dtype=np.float64)
     den = np.zeros((H, W), dtype=np.float64)
+
+    # 经过 VST 后，全局方差固定为 1.0
+    sigma_vst = 1.0
+    threshold = 2.7 * sigma_vst
 
     for res in all_results:
         ry, rx = res['ref_pos']
         coords = [(ry, rx)] + [(y, x) for _, y, x in res['top_matches']]
 
         group = np.stack(
-            [img[y:y + PATCH, x:x + PATCH] for y, x in coords], axis=0
+            [img_vst[y:y + PATCH, x:x + PATCH] for y, x in coords], axis=0
         ).astype(np.float64)
 
-        local_mean = max(float(group[0].mean()), 0.0)
-        local_var  = a * local_mean + sigma_norm
-        threshold  = 2.7 * np.sqrt(max(local_var, 1e-12))
-
         freq = dctn(group, norm='ortho')
+        
+        # 固定的全局硬阈值截断
         freq[np.abs(freq) < threshold] = 0.0
         n_nz = int(np.count_nonzero(freq))
-        w    = 1.0 / (n_nz * local_var) if n_nz > 0 else 1.0 / max(local_var, 1e-12)
+        
+        # 权重计算仅与非零系数数量有关，不依赖局部亮度
+        w = 1.0 / (n_nz * (sigma_vst ** 2)) if n_nz > 0 else 1.0 / (sigma_vst ** 2)
 
         denoised = idctn(freq, norm='ortho')
         for i, (y, x) in enumerate(coords):
             num[y:y + PATCH, x:x + PATCH] += denoised[i] * w
             den[y:y + PATCH, x:x + PATCH] += w
 
-    out = img.copy()
+    out = img_vst.copy()
     mask = den > 0
     out[mask] = num[mask] / den[mask]
-    return np.clip(out, 0.0, 1.0)
+    return out
 
 
 # ── 单图像处理流程 ────────────────────────────────────────────────────────────
 
 def process_one(args: tuple) -> dict:
-    """
-    读取单张图 -> 块匹配 (40核并行) -> BM3D滤波 -> 保存 TIFF -> 返回指标。
-    args: (noisy_path, clean_path, iso, scene, frame_id, noisy_idx, out_dir,
-           a_norm, sigma_norm)
-    """
     noisy_path, clean_path, iso, scene, frame_id, noisy_idx, out_dir, \
         a_norm, sigma_norm = args
 
@@ -215,15 +215,33 @@ def process_one(args: tuple) -> dict:
 
     psnr_in = float(skpsnr(clean, noisy, data_range=1.0))
 
-    guide = cv2.GaussianBlur(noisy, (5, 5), 1.5)
+    # ==========================
+    # 1. 前向 VST 变换
+    # ==========================
+    noisy_vst = forward_vst(noisy, a_norm, sigma_norm)
 
+    # 引导图也在 VST 域生成
+    guide_vst = cv2.GaussianBlur(noisy_vst, (5, 5), 1.5)
+
+    # ==========================
+    # 2. VST 域内的块匹配
+    # ==========================
     t0 = time.perf_counter()
-    matches = vectorized_match_parallel(guide, num_workers=NUM_WORKERS)
+    matches = vectorized_match_parallel(guide_vst, num_workers=NUM_WORKERS)
     t_match = time.perf_counter() - t0
 
+    # ==========================
+    # 3. VST 域内的 BM3D 滤波 (固定阈值)
+    # ==========================
     t1 = time.perf_counter()
-    denoised = bm3d_poisson_gaussian(noisy, matches, a_norm, sigma_norm)
+    denoised_vst = bm3d_awgn_filtering(noisy_vst, matches)
     t_filter = time.perf_counter() - t1
+
+    # ==========================
+    # 4. 后向逆 VST 变换
+    # ==========================
+    denoised = inverse_vst_algebraic(denoised_vst, a_norm, sigma_norm)
+    denoised = np.clip(denoised, 0.0, 1.0)
 
     psnr_out = float(skpsnr(clean, denoised, data_range=1.0))
 
@@ -252,17 +270,20 @@ def collect_tasks(
     crvd_root: str,
     results_root: str,
     noise_params: dict[tuple[str, int, int], tuple[float, float]],
+    iso_filter: int | None = None,
+    scene_filter: str | None = None,
+    noisy_filter: int | None = None,
 ) -> list[tuple]:
-    """
-    遍历 CRVD 目录，为每张 noisy TIFF 构建一个任务 tuple，
-    其中包含从 noise_params 中查到的 (a_norm, sigma_norm)。
-    """
     tasks: list[tuple] = []
     for scene_dir in sorted(glob.glob(os.path.join(crvd_root, 'scene*'))):
         scene = os.path.basename(scene_dir)
+        if scene_filter is not None and scene != scene_filter:
+            continue
         for iso_dir in sorted(glob.glob(os.path.join(scene_dir, 'ISO*'))):
             iso_name = os.path.basename(iso_dir)
             iso_val  = int(re.sub(r'\D', '', iso_name))
+            if iso_filter is not None and iso_val != iso_filter:
+                continue
             out_dir  = os.path.join(results_root, scene, iso_name)
             for clean_path in sorted(glob.glob(
                     os.path.join(iso_dir, 'frame*_clean.tiff'))):
@@ -281,6 +302,8 @@ def collect_tasks(
                     nm = re.search(r'frame\d+_noisy(\d+)\.tiff',
                                    os.path.basename(np_path))
                     nidx = int(nm.group(1)) if nm else -1
+                    if noisy_filter is not None and nidx != noisy_filter:
+                        continue
                     tasks.append((
                         np_path, clean_path, iso_val, scene, fid, nidx,
                         out_dir, a_norm, sigma_norm,
@@ -292,22 +315,25 @@ def collect_tasks(
 
 def run(
     crvd_root:    str = 'data/CRVD/noisy',
-    results_root: str = 'out/results/CRVD/my_brute_bm3d_8c',
-    csv_out:      str = 'out/results/CRVD/my_brute_bm3d_8c/results.csv',
+    results_root: str = 'out/results/CRVD/my_brute_bm3d_8c_vst',
+    csv_out:      str = 'out/results/CRVD/my_brute_bm3d_8c_vst/results.csv',
     params_csv:   str = 'out/results/crvd_noise_params.csv',
+    iso_filter:   int | None = None,
+    scene_filter: str | None = None,
+    noisy_filter: int | None = None,
 ) -> None:
 
     print(f"加载噪声参数: {params_csv}")
     noise_params = load_noise_params(params_csv)
     print(f"  已读取 {len(noise_params)} 组 (scene, iso, frame) 参数")
 
-    tasks = collect_tasks(crvd_root, results_root, noise_params)
+    tasks = collect_tasks(crvd_root, results_root, noise_params, iso_filter, scene_filter, noisy_filter)
     print(f"共 {len(tasks)} 张图像，单图内层使用 {NUM_WORKERS} 核并行块匹配…\n")
 
     os.makedirs(os.path.dirname(csv_out), exist_ok=True)
     rows: list[dict] = []
 
-    pbar = tqdm(tasks, desc='BM3D-CRVD', dynamic_ncols=True)
+    pbar = tqdm(tasks, desc='BM3D-CRVD-VST', dynamic_ncols=True)
     for task in pbar:
         try:
             row = process_one(task)
@@ -317,7 +343,6 @@ def run(
                 'f':        row['frame'],
                 'n':        row['noisy_idx'],
                 'PSNR↑':    f"{row['psnr_denoised_dB']:.2f} dB",
-                'match(s)': row['time_match_s'],
             })
         except Exception as e:
             tqdm.write(f"[ERR] {task[0]}: {e}")
@@ -354,15 +379,21 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='CRVD BM3D 批量降噪（泊松-高斯自适应，40核单图并行）')
+        description='CRVD BM3D 批量降噪（VST 泊松高斯自适应，40核并行）')
     parser.add_argument('--root',   default='data/CRVD/noisy',
                         help='CRVD noisy 根目录')
-    parser.add_argument('--out',    default='out/results/CRVD/my_brute_bm3d_8c',
+    parser.add_argument('--out',    default='out/results/CRVD/my_brute_bm3d_8c_vst',
                         help='输出根目录')
-    parser.add_argument('--csv',    default='out/results/CRVD/my_brute_bm3d_8c/results.csv',
+    parser.add_argument('--csv',    default='out/results/CRVD/my_brute_bm3d_8c_vst/results.csv',
                         help='PSNR 结果 CSV 路径')
     parser.add_argument('--params', default='out/results/crvd_noise_params.csv',
                         help='噪声参数 CSV（由 crvd_noise_estimate.py 生成）')
+    parser.add_argument('--iso', type=int, default=None,
+                        help='只处理指定 ISO（如 25600），默认处理全部')
+    parser.add_argument('--scene', type=str, default=None,
+                        help='只处理指定 scene（如 scene1），默认处理全部')
+    parser.add_argument('--noisy', type=int, default=None,
+                        help='只处理指定 noisy 版本（如 0），默认处理全部')
     args = parser.parse_args()
 
-    run(args.root, args.out, args.csv, args.params)
+    run(args.root, args.out, args.csv, args.params, args.iso, args.scene, args.noisy)
